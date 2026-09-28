@@ -1,7 +1,9 @@
 name: Test, build & publish
 
 # Every push and pull request runs the full test suite (with coverage thresholds) and a smoke
-# test of the real Docker image. Only pushes to main / version tags publish the image.
+# test of both real Docker images. Only pushes to main / version tags publish them:
+#   ghcr.io/<repo>:latest        CPU + Vulkan (Intel/AMD GPUs), amd64 and arm64
+#   ghcr.io/<repo>:latest-cuda   CPU + CUDA (NVIDIA GPUs), amd64
 on:
   push:
     branches: [main]
@@ -28,12 +30,16 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # The file checks are tested on real episodes made with ffmpeg (whisper-cli is a stand-in).
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Check the web UI script parses
         run: npm run test:ui
 
-      # Unit + API tests against local stand-ins for Sonarr and webhooks — no network or API
-      # keys needed. Fails if coverage drops
-      # below the thresholds in package.json (lines 90%, branches 75%, functions 85%).
+      # Unit + API tests against local stand-ins for Sonarr, webhooks, the model download and
+      # whisper-cli — no network or API keys needed. Fails if coverage drops below the
+      # thresholds in package.json (lines 90%, branches 75%, functions 85%).
       - name: Run tests with coverage
         run: npm run test:coverage
 
@@ -50,9 +56,13 @@ jobs:
           if-no-files-found: ignore
 
   smoke:
-    name: Container smoke test
+    name: Container smoke test (${{ matrix.gpu }})
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [vulkan, cuda]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -63,14 +73,16 @@ jobs:
           context: .
           load: true
           tags: dualarr:ci
-          cache-from: type=gha
+          build-args: GPU=${{ matrix.gpu }}
+          cache-from: type=gha,scope=${{ matrix.gpu }}
+          cache-to: type=gha,scope=${{ matrix.gpu }},mode=max
 
       - name: Start it like a user would
         run: |
-          mkdir -p "$RUNNER_TEMP/config"
+          mkdir -p "$RUNNER_TEMP/config" "$RUNNER_TEMP/media"
           docker run -d --name dualarr -p 6162:6162 \
             -e TZ=Europe/London -e PUID=1001 -e PGID=1002 \
-            -v "$RUNNER_TEMP/config:/config" dualarr:ci
+            -v "$RUNNER_TEMP/config:/config" -v "$RUNNER_TEMP/media:/media:ro" dualarr:ci
 
       - name: Wait for the API
         run: |
@@ -100,24 +112,58 @@ jobs:
           KEY=$(curl -fsS -b jar http://localhost:6162/api/settings | sed -n 's/.*"apiKey":"\([0-9a-f]*\)".*/\1/p')
           curl -fsS -H "X-Api-Key: $KEY" http://localhost:6162/api/status | grep -q '"schedule":"0 4 \* \* \*"'
           curl -s -X POST -H "X-Api-Key: $KEY" http://localhost:6162/api/scan | grep -q 'Connect Sonarr'
+          # ffmpeg and whisper.cpp are in the image and run (on the CPU: there's no GPU here)
+          curl -fsS -H "X-Api-Key: $KEY" http://localhost:6162/api/verify > verify.json
+          cat verify.json
+          grep -q '"ffmpeg":"ffmpeg version' verify.json
+          grep -q '"whisper":"v1\.' verify.json
+          grep -q '"gpu":"${{ matrix.gpu }}"' verify.json
+          grep -q '"device":"CPU"' verify.json
+          docker exec dualarr /opt/whisper/whisper-cli -h 2>&1 | grep -q 'usage:'
           # runs as PUID:PGID and /config belongs to them
           docker exec dualarr sh -c 'grep "^Uid:" /proc/1/status' | grep -q $'\t1001\t'
           test "$(stat -c '%u:%g' "$RUNNER_TEMP/config/dualarr.db")" = "1001:1002"
           # honours TZ for the schedule
           docker logs dualarr 2>&1 | grep -q '(TZ Europe/London)'
 
+      - name: Check a real file with a real model
+        run: |
+          set -eux
+          # A spoken-word clip isn't at hand, so this checks the plumbing: the model downloads,
+          # ffmpeg cuts the clips and whisper-cli answers for every track.
+          docker exec dualarr ffmpeg -v error -f lavfi -i "sine=f=440:d=120" -f lavfi -i "sine=f=880:d=120" \
+            -map 0 -map 1 -metadata:s:a:0 language=jpn -metadata:s:a:1 language=eng -c:a aac /tmp/ep.mkv
+          docker exec dualarr node --input-type=module -e "
+            process.env.CONFIG_DIR = '/tmp/smoke';
+            const v = await import('/app/server/verify.js');
+            const model = await v.downloadModel('tiny');
+            const t = await v.tools();
+            const r = await v.checkFile('/tmp/ep.mkv', { model, device: v.deviceArgs('auto', t.devices) });
+            console.log(JSON.stringify(r));
+            if (r.audio.length !== 2 || r.audio.some((a) => !a.lang)) process.exit(1);
+          "
+
       - name: Container logs
         if: always()
         run: docker logs dualarr || true
 
   image:
-    name: Publish image
+    name: Publish image (${{ matrix.gpu }})
     needs: [test, smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - gpu: vulkan
+            suffix: ''
+            platforms: linux/amd64,linux/arm64
+          - gpu: cuda
+            suffix: -cuda
+            platforms: linux/amd64
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -131,6 +177,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -139,9 +188,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms }}
+          build-args: GPU=${{ matrix.gpu }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.gpu }}
+          cache-to: type=gha,scope=${{ matrix.gpu }},mode=max

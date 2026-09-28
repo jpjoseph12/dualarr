@@ -8,11 +8,21 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 
+import http from 'node:http';
 import { API_KEY, startSonarr } from './fixtures/mock-sonarr.mjs';
 import { startSink } from './fixtures/sink.mjs';
+import { hasFfmpeg, makeEpisode } from './fixtures/media.mjs';
 
 const CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dualarr-api-'));
 process.env.CONFIG_DIR = CONFIG_DIR;
+process.env.WHISPER_BIN = new URL('./fixtures/fake-whisper.mjs', import.meta.url).pathname;
+// A stand-in for the model download.
+const models = http.createServer((req, res) => {
+  if (!req.url.endsWith('ggml-tiny.bin')) return res.writeHead(404).end();
+  res.end(Buffer.concat([Buffer.from('lmgg'), Buffer.alloc(1000)]));
+});
+await new Promise((r) => models.listen(0, r));
+process.env.WHISPER_MODEL_URL = `http://127.0.0.1:${models.address().port}`;
 
 const auth = await import('../server/auth.js');
 const store = await import('../server/db.js');
@@ -28,7 +38,7 @@ before(async () => {
   const s = await new Promise((r) => {
     const srv = app.listen(0, () => r(srv));
   });
-  servers.push(s, sonarr.server, sink.server);
+  servers.push(s, sonarr.server, sink.server, models);
   C = `http://127.0.0.1:${s.address().port}`;
 });
 after(() => servers.forEach((s) => (s.closeAllConnections?.(), s.close())));
@@ -379,6 +389,85 @@ describe('rules changes', () => {
     const runs = await ok('GET', '/api/runs');
     assert.deepEqual(runs.slice(0, 3).map((r) => r.trigger), ['rules', 'rules', 'setup']);
     assert.ok(runs.every((r) => r.finished_at && r.summary));
+  });
+});
+
+describe('checking files', () => {
+  const MEDIA = path.join(CONFIG_DIR, 'media');
+
+  test('settings are validated', async () => {
+    for (const bad of [
+      { verifyModel: 'large' },
+      { verifyDevice: 'gpu' },
+      { verifyDevice: 'npu:0' },
+      { pathMappings: 'nope' },
+      { pathMappings: [{ from: 'anime', to: '/media' }] },
+      { pathMappings: [{ from: '/anime', to: 'media' }] },
+    ]) assert.equal((await me.ui('PUT', '/api/settings', bad)).status, 400, JSON.stringify(bad));
+    const s = await ok('PUT', '/api/settings', {
+      verify: 1,
+      verifyModel: 'tiny',
+      verifyDevice: 'gpu:1',
+      verifyPerRun: 0,
+      pathMappings: [{ from: ' /anime ', to: `${MEDIA} ` }, { from: '', to: '' }, { from: 'D:\\Anime', to: '/win' }],
+    });
+    assert.deepEqual([s.verify, s.verifyModel, s.verifyDevice, s.verifyPerRun], [true, 'tiny', 'gpu:1', 1]);
+    assert.deepEqual(s.pathMappings, [{ from: '/anime', to: MEDIA }, { from: 'D:\\Anime', to: '/win' }]);
+    assert.equal(s.rescanning, false, 'checking settings don’t rescan');
+    await ok('PUT', '/api/settings', { verifyDevice: 'auto', verifyPerRun: 100, pathMappings: [{ from: '/anime', to: MEDIA }] });
+  });
+
+  test('status: tools, GPUs, the model, and which Sonarr folders are visible', async () => {
+    fs.mkdirSync(MEDIA, { recursive: true });
+    process.env.FAKE_GPU = 'NVIDIA GeForce GTX 1050 Ti';
+    const st = await ok('GET', '/api/verify?refresh=1');
+    delete process.env.FAKE_GPU;
+    assert.equal(st.tools.whisper, 'installed');
+    assert.deepEqual(st.tools.devices.map((d) => d.name), ['NVIDIA GeForce GTX 1050 Ti']);
+    assert.equal(st.device, 'NVIDIA GeForce GTX 1050 Ti (Vulkan)');
+    assert.deepEqual(Object.keys(st.models), ['tiny', 'base', 'small']);
+    assert.deepEqual([st.model.name, st.model.present, st.download], ['tiny', false, null]);
+    assert.deepEqual(st.roots, [{ path: '/anime', mapped: MEDIA, visible: true }, { path: '/tv', mapped: '/tv', visible: false }]);
+    await ok('GET', '/api/verify?refresh=1');
+  });
+
+  test('the model downloads in the background', async () => {
+    assert.equal((await me.ui('POST', '/api/verify/model', { model: 'huge' })).status, 400);
+    const r = await me.ui('POST', '/api/verify/model', {});
+    assert.equal(r.status, 202);
+    for (let i = 0; i < 100 && !(await ok('GET', '/api/verify')).model.present; i++) await new Promise((res) => setTimeout(res, 20));
+    const st = await ok('GET', '/api/verify');
+    assert.deepEqual([st.model.present, st.download.done, st.download.error], [true, true, null]);
+    assert.equal((await me.ui('POST', '/api/verify/model', {})).status, 202, 'already there: nothing to do');
+  });
+
+  test('verify now, a series again, and the test button', { skip: !hasFfmpeg() && 'needs ffmpeg' }, async () => {
+    for (const f of sonarr.state.files) f.size = 1e9;
+    makeEpisode(path.join(MEDIA, 'Frieren/Season 2/Frieren - S02E01.mkv'), { audio: [{ sound: 'en', tag: 'jpn' }], subs: [{ lang: 'en', tag: 'eng' }] });
+    await ok('POST', '/api/scan');
+    await waitIdle();
+    const t = await ok('POST', '/api/verify/test');
+    assert.deepEqual([t.title, t.file, t.status, t.device], ['Frieren', 'Frieren/Season 2/Frieren - S02E01.mkv', 'noJapanese', 'CPU']);
+    assert.deepEqual(t.notes, ['Audio 1 is tagged Japanese but sounds English']);
+
+    assert.equal((await me.ui('POST', '/api/verify', { seriesIds: [] })).status, 400);
+    assert.equal((await me.ui('POST', '/api/verify', { seriesIds: [1] })).status, 202);
+    await waitIdle();
+    const run = (await ok('GET', '/api/runs'))[0];
+    assert.deepEqual([run.trigger, run.status, run.summary.verified.files, run.summary.verified.missing], ['verify', 'partial', 1, 3], 'the rest of Frieren isn’t in the test media');
+    const fr = await ok('GET', '/api/series/1');
+    assert.deepEqual([fr.verified, fr.files.find((f) => f.verified).status], [1, 'noJapanese']);
+    assert.equal((await ok('GET', '/api/library')).totals.verified, 1);
+    assert.equal((await me.ui('POST', '/api/verify', {})).status, 202, 'the next files due');
+    await waitIdle();
+  });
+
+  test('refused when checking is off', async () => {
+    await ok('PUT', '/api/settings', { verify: false });
+    const r = await me.ui('POST', '/api/verify', {});
+    assert.deepEqual([r.status, r.body.error], [400, 'Turn on “Check files” in Settings first']);
+    await ok('PUT', '/api/settings', { pathMappings: [] });
+    assert.match((await me.ui('POST', '/api/verify/test')).body.error, /^None of the library's files are visible/);
   });
 });
 

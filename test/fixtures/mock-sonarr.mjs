@@ -91,6 +91,7 @@ export function startSonarr(port = 0) {
       let m;
       if (p === '/system/status') return send(200, { appName: 'Sonarr', version: '4.0.15.2941' });
       if (p === '/series') return send(200, state.series);
+      if (p === '/rootfolder') return send(200, [{ id: 1, path: '/anime' }, { id: 2, path: '/tv' }]);
       if ((m = p.match(/^\/series\/(\d+)$/))) {
         const s = state.series.find((x) => x.id === Number(m[1]));
         return s ? send(200, s) : send(404, { message: 'NotFound' });

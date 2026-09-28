@@ -7,7 +7,8 @@ import { TZ, VERSION, log } from './config.js';
 import * as store from './db.js';
 import * as rules from './rules.js';
 import { sonarrClient } from './sonarr.js';
-import { currentJob, replaceJob, scanJob, searchJob, setupJob, setupState } from './jobs.js';
+import { currentJob, replaceJob, scanJob, searchJob, setupJob, setupState, verifyJob, verifyTestJob } from './jobs.js';
+import * as verify from './verify.js';
 import { nextRun, schedule, validateCron } from './scheduler.js';
 import { NOTIFIER_TYPES, SECRET_FIELDS, send as sendNotification } from './notify.js';
 import * as auth from './auth.js';
@@ -76,6 +77,20 @@ function sanitizeNotifiers(list, saved = []) {
   });
 }
 
+/** Path mappings: Sonarr's folder (any OS) -> an absolute folder in this container. */
+function sanitizeMappings(list) {
+  if (!Array.isArray(list)) throw bad('pathMappings must be a list');
+  return list
+    .slice(0, 20)
+    .map((m) => ({ from: String(m?.from ?? '').trim(), to: String(m?.to ?? '').trim() }))
+    .filter((m) => m.from || m.to)
+    .map((m) => {
+      if (!/^([a-zA-Z]:)?[\\/]/.test(m.from)) throw bad(`“${m.from}” isn't a full Sonarr path`);
+      if (!m.to.startsWith('/')) throw bad(`“${m.to}” isn't a full path in the container (it starts with /)`);
+      return m;
+    });
+}
+
 // Settings that change a file's verdict: saving a change rescans the library.
 const RULE_KEYS = ['scope', 'requireSubtitles', 'subtitleLanguage'];
 
@@ -110,6 +125,17 @@ function sanitizeSettings(b, saved) {
     patch.schedule = expr;
   }
   if (b.notifiers !== undefined) patch.notifiers = sanitizeNotifiers(b.notifiers, saved.notifiers);
+  if (b.verify !== undefined) patch.verify = !!b.verify;
+  if (b.verifyModel !== undefined) {
+    if (!verify.MODELS[b.verifyModel]) throw bad(`Unknown model "${b.verifyModel}"`);
+    patch.verifyModel = b.verifyModel;
+  }
+  if (b.verifyDevice !== undefined) {
+    if (!/^(auto|cpu|gpu:\d{1,2})$/.test(b.verifyDevice)) throw bad('verifyDevice must be auto, cpu or gpu:N');
+    patch.verifyDevice = b.verifyDevice;
+  }
+  if (b.verifyPerRun !== undefined) patch.verifyPerRun = clampInt(b.verifyPerRun, 1, 5000, saved.verifyPerRun);
+  if (b.pathMappings !== undefined) patch.pathMappings = sanitizeMappings(b.pathMappings);
   return patch;
 }
 
@@ -335,6 +361,57 @@ app.post('/api/setup', async (req, res) => {
   const run = jobResult(await setupJob());
   const settings = store.getSettings();
   res.json({ ...run, ...(await setupState(sonarrOr400(settings), settings)) });
+});
+
+// ---------- checking files ----------
+
+/** Tools, GPUs, the model, and whether Sonarr's root folders are visible here. */
+app.get('/api/verify', async (req, res) => {
+  const s = store.getSettings();
+  const tools = await verify.tools({ refresh: req.query.refresh === '1' });
+  let roots = [];
+  const client = sonarrClient(s);
+  if (client) {
+    try {
+      roots = (await client.rootFolders()).map((r) => {
+        const mapped = verify.mapPath(r.path, s.pathMappings);
+        return { path: r.path, mapped, visible: fs.existsSync(mapped) };
+      });
+    } catch (e) {
+      log(`Could not read Sonarr's root folders: ${e.message}`);
+    }
+  }
+  res.json({
+    tools,
+    device: verify.deviceArgs(s.verifyDevice, tools.devices).label,
+    models: verify.MODELS,
+    model: verify.modelInfo(s.verifyModel),
+    download: verify.downloadState(),
+    roots,
+  });
+});
+
+app.post('/api/verify/model', (req, res) => {
+  const name = req.body?.model ?? store.getSettings().verifyModel;
+  if (!verify.MODELS[name]) throw bad(`Unknown model "${name}"`);
+  if (!verify.modelInfo(name).present) verify.downloadModel(name).catch((e) => log(`Model download failed: ${e.message}`));
+  res.status(202).json({ download: verify.downloadState() });
+});
+
+app.post('/api/verify', (req, res) => {
+  sonarrOr400();
+  if (!store.getSettings().verify) throw bad('Turn on “Check files” in Settings first');
+  const ids = req.body?.seriesIds !== undefined ? intList(req.body.seriesIds) : null;
+  if (ids && !ids.length) throw bad('Pick a series');
+  verifyJob({ seriesIds: ids, force: !!req.body?.force });
+  res.status(202).json({ started: true });
+});
+
+app.post('/api/verify/test', async (_req, res) => {
+  sonarrOr400();
+  const run = await verifyTestJob();
+  if (run.status === 'error') throw bad(run.summary.error);
+  res.json(run.result);
 });
 
 // ---------- settings ----------

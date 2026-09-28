@@ -7,9 +7,12 @@ import fs from 'node:fs';
 
 import { API_KEY, library, startSonarr } from './fixtures/mock-sonarr.mjs';
 import { startSink } from './fixtures/sink.mjs';
+import { hasFfmpeg, makeEpisode } from './fixtures/media.mjs';
 
 process.env.CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dualarr-jobs-'));
+process.env.WHISPER_BIN = new URL('./fixtures/fake-whisper.mjs', import.meta.url).pathname;
 const store = await import('../server/db.js');
+const verify = await import('../server/verify.js');
 const jobs = await import('../server/jobs.js');
 const rules = await import('../server/rules.js');
 
@@ -26,7 +29,7 @@ function reset(settings = {}) {
   Object.assign(sonarr.state, library(), { writes: [], commands: [], failed: [], deleted: [], failSeries: new Set(), failHistory: false, failCommands: false, failMarkFailed: false });
   sink.received.length = 0;
   sink.fail = false;
-  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings');
+  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings; DELETE FROM checks');
   store.saveSettings({
     sonarrUrl: sonarr.url,
     sonarrApiKey: API_KEY,
@@ -276,5 +279,143 @@ describe('setup', () => {
     await jobs.setupJob();
     const st = await jobs.setupState(client, store.getSettings());
     assert.deepEqual(st.profiles.map((p) => [p.name, p.series, p.ready]), [['Anime', 3, true], ['HD-1080p', 2, false], ['Ultra-HD', 0, false]]);
+  });
+});
+
+describe('checking files', { skip: !hasFfmpeg() && 'needs ffmpeg' }, () => {
+  const MEDIA = path.join(process.env.CONFIG_DIR, 'media');
+  const ep = (rel, spec) => makeEpisode(path.join(MEDIA, rel), spec);
+  const on = { verify: true, pathMappings: [{ from: '/anime', to: MEDIA }], verifyPerRun: 20 };
+
+  before(() => {
+    // The model is a stand-in; fake-whisper.mjs only checks it exists.
+    fs.mkdirSync(path.join(process.env.CONFIG_DIR, 'models'), { recursive: true });
+    fs.writeFileSync(verify.modelPath('base'), 'lmgg');
+    // Dandadan's files as they really are, whatever their tags say:
+    ep('Dandadan/Season 1/Dandadan - S01E01.mkv', { audio: [{ sound: 'ja', tag: 'jpn' }, { sound: 'en', tag: 'eng' }], subs: [{ lang: 'en', tag: 'eng', kind: 'signs' }] });
+    ep('Dandadan/Season 1/Dandadan - S01E02.mkv', { audio: [{ sound: 'en', tag: 'jpn' }], subs: [{ lang: 'en', tag: 'eng' }] });
+    ep('Dandadan/Season 1/Dandadan - S01E03.mkv', { audio: [{ sound: 'ja', tag: 'eng' }], subs: [{ lang: 'en', tag: 'eng' }] });
+  });
+  // The mock's file sizes are made up; the checks must match them.
+  const sizes = () => sonarr.state.files.forEach((f) => (f.size = 1e9));
+
+  test('the scheduled scan checks what is due, and its verdicts use what it found', async () => {
+    reset(on);
+    sizes();
+    await jobs.scanJob('scan'); // the tags alone first
+    assert.deepEqual(store.getSeries(2).counts, { dual: 1, subbed: 1, noSubs: 0, noJapanese: 1, unknown: 0 });
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    const v = r.summary.verified;
+    assert.deepEqual([v.files, v.missing, v.failed, v.device], [3, 7, 0, 'CPU']);
+    assert.deepEqual(v.mismatches, [
+      { title: 'Dandadan', file: 'Dandadan/Season 1/Dandadan - S01E01.mkv', notes: ['Subtitles 1 (English) are signs & songs only'] },
+      { title: 'Dandadan', file: 'Dandadan/Season 1/Dandadan - S01E02.mkv', notes: ['Audio 1 is tagged Japanese but sounds English'] },
+      { title: 'Dandadan', file: 'Dandadan/Season 1/Dandadan - S01E03.mkv', notes: ['Audio 1 is tagged English but sounds Japanese'] },
+    ]);
+    assert.match(r.summary.warnings.find((w) => /not found/.test(w)), /^7 file\(s\) not found in this container, e\.g\. .*media\/.* — mount the media folder/);
+    const row = store.getSeries(2);
+    assert.deepEqual([row.counts, row.verified], [{ dual: 0, subbed: 1, noSubs: 1, noJapanese: 1, unknown: 0 }, 3]);
+    assert.deepEqual(row.files.map((f) => [f.status, f.verified]), [['noSubs', true], ['noJapanese', true], ['subbed', true]]);
+    assert.deepEqual(r.summary.problems, [{ id: 2, title: 'Dandadan', noJapanese: 0, noSubs: 1 }], 'what the check found is news');
+    assert.deepEqual(events(), ['problems']);
+    assert.ok(r.summary.searched.length, 'and searches as usual');
+
+    // Next time only the files it couldn't see are due.
+    const again = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual([again.summary.verified.files, again.summary.verified.missing], [0, 7]);
+    assert.equal(store.getSeries(2).verified, 3, 'checks are kept');
+  });
+
+  test('manual scans don’t check; with checking off the schedule doesn’t either', async () => {
+    reset({ ...on });
+    sizes();
+    assert.equal((await jobs.scanJob('scan')).summary.verified, undefined);
+    store.saveSettings({ verify: false });
+    assert.equal((await jobs.scanJob('schedule', { autoSearch: true })).summary.verified, undefined);
+  });
+
+  test('dueForVerify: never checked or changed, Sonarr’s unknowns first, then the newest', () => {
+    reset(on);
+    const s = { id: 9 };
+    const f = (id, extra) => ({ id, size: 10, relativePath: `${id}.mkv`, mediaInfo: { audioLanguages: 'jpn', subtitles: 'eng' }, ...extra });
+    store.saveCheck(1, 9, 10, { audio: [] });
+    store.saveCheck(2, 9, 99, { audio: [] }); // the file changed since
+    const fetched = [{ s, files: [f(1), f(2, { dateAdded: '2026-01-01' }), f(3, { dateAdded: '2026-06-01' }), f(4, { mediaInfo: null }), f(5)] }];
+    assert.deepEqual(jobs.dueForVerify(fetched, store.getSettings()).map((d) => d.f.id), [4, 3, 2, 5]);
+    assert.deepEqual(jobs.dueForVerify(fetched, store.getSettings(), { limit: 2 }).map((d) => d.f.id), [4, 3]);
+    assert.deepEqual(jobs.dueForVerify(fetched, store.getSettings(), { force: true }).map((d) => d.f.id), [4, 3, 2, 1, 5]);
+  });
+
+  test('verifyJob: the next files, or a series again', async () => {
+    reset(on);
+    sizes();
+    await jobs.scanJob('scan');
+    const off = await jobs.verifyJob({ seriesIds: [2] });
+    assert.equal(off.status, 'ok');
+    assert.equal(off.summary.verified.files, 3);
+    assert.deepEqual(off.summary.problems, [{ id: 2, title: 'Dandadan', noJapanese: 0, noSubs: 1 }]);
+    const none = await jobs.verifyJob({ seriesIds: [2] });
+    assert.equal(none.summary.error, 'Every file has been checked already');
+    const force = await jobs.verifyJob({ seriesIds: [2], force: true });
+    assert.equal(force.summary.verified.files, 3, 'force checks them again');
+    const next = await jobs.verifyJob();
+    assert.deepEqual([next.summary.verified.files, next.summary.verified.missing], [0, 7], 'the rest are not visible');
+    store.saveSettings({ verify: false });
+    assert.match((await jobs.verifyJob()).summary.error, /Turn on “Check files” in Settings first/);
+  });
+
+  test('a file that can’t be read is noted and not tried again; missing tools stop the job', async () => {
+    reset(on);
+    sizes();
+    const junk = path.join(MEDIA, 'Frieren/Season 1/Frieren - S01E01.mkv');
+    fs.mkdirSync(path.dirname(junk), { recursive: true });
+    fs.writeFileSync(junk, 'not a video');
+    try {
+      const r = await jobs.verifyJob({ seriesIds: [1] });
+      assert.equal(r.status, 'partial');
+      assert.deepEqual([r.summary.verified.files, r.summary.verified.failed], [0, 1]);
+      assert.match(r.summary.warnings[0], /^Checking Frieren\/Season 1\/Frieren - S01E01\.mkv: ffprobe failed/);
+      assert.match(store.getSeries(1).files[0].notes[0], /^Couldn’t check the file: ffprobe failed/);
+      assert.deepEqual(jobs.dueForVerify([{ s: { id: 1 }, files: sonarr.state.files.filter((f) => f.seriesId === 1) }], store.getSettings()).map((d) => d.f.id), [102, 103, 104]);
+    } finally {
+      fs.rmSync(junk);
+    }
+    const bin = verify.BIN.whisper;
+    verify.BIN.whisper = '/nonexistent/whisper-cli';
+    await verify.tools({ refresh: true });
+    try {
+      const r = await jobs.verifyJob({ seriesIds: [2] });
+      assert.equal(r.summary.error, 'Checking files needs whisper — they come with the Dualarr Docker image');
+    } finally {
+      verify.BIN.whisper = bin;
+      await verify.tools({ refresh: true });
+    }
+  });
+
+  test('verifyTestJob tries one visible file and stores nothing', async () => {
+    reset(on);
+    assert.equal((await jobs.verifyTestJob()).summary.error, 'Scan the library first');
+    await jobs.scanJob('scan');
+    const r = await jobs.verifyTestJob();
+    assert.deepEqual([r.result.title, r.result.file, r.result.status, r.result.device], ['Dandadan', 'Dandadan/Season 1/Dandadan - S01E01.mkv', 'noSubs', 'CPU']);
+    assert.deepEqual(r.result.notes, ['Subtitles 1 (English) are signs & songs only']);
+    assert.equal(r.summary.tested.title, 'Dandadan');
+    assert.equal(store.getChecks(2).size, 0);
+    store.saveSettings({ pathMappings: [] });
+    assert.match((await jobs.verifyTestJob()).summary.error, /^None of the library's files are visible in this container \(looked for \/anime\/Dandadan\/.*\) — mount the media folder/);
+  });
+
+  test('checks are forgotten with their files and series', async () => {
+    reset(on);
+    sizes();
+    await jobs.scanJob('scan');
+    await jobs.verifyJob({ seriesIds: [2] });
+    assert.equal(store.getChecks(2).size, 3);
+    sonarr.state.files = sonarr.state.files.filter((f) => f.id !== 201);
+    await jobs.scanJob('scan');
+    assert.deepEqual([...store.getChecks(2).keys()], [202, 203]);
+    sonarr.state.series = sonarr.state.series.filter((s) => s.id !== 2);
+    await jobs.scanJob('scan');
+    assert.equal(store.getChecks(2).size, 0);
   });
 });

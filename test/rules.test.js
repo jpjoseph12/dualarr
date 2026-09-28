@@ -61,9 +61,126 @@ describe('verdicts', () => {
     const c = rules.classifyFile({
       ...f('jpn', 'eng'), seasonNumber: 2, sceneName: 'Rel', size: 5, customFormatScore: 1500, quality: { quality: { name: 'Bluray-1080p' } },
     });
-    assert.deepEqual(c, { id: 1, season: 2, path: 'Show/Season 1/Show - S01E01.mkv', release: 'Rel', quality: 'Bluray-1080p', score: 1500, size: 5, audio: ['ja'], subs: ['en'], status: 'subbed' });
+    assert.deepEqual(c, { id: 1, season: 2, path: 'Show/Season 1/Show - S01E01.mkv', release: 'Rel', quality: 'Bluray-1080p', score: 1500, size: 5, audio: ['ja'], subs: ['en'], status: 'subbed', verified: false, notes: [] });
     const bare = rules.classifyFile({ id: 2, seasonNumber: 1 });
     assert.deepEqual([bare.path, bare.release, bare.quality, bare.score, bare.size], ['', null, null, null, 0]);
+  });
+});
+
+describe('checked files', () => {
+  const file = { id: 1, seasonNumber: 1, size: 100, relativePath: 'x.mkv', mediaInfo: { audioLanguages: 'jpn/eng', subtitles: 'eng' } };
+  const check = (audio, subs = [{ track: 1, tag: 'en', lang: 'en', kind: 'full' }]) => ({ size: 100, audio, subs });
+
+  test('what the file really has replaces the tags', () => {
+    const c = rules.classifyFile(file, {}, check([{ track: 1, tag: 'ja', lang: 'en', p: 0.95 }, { track: 2, tag: 'en', lang: 'en', p: 0.9 }]));
+    assert.deepEqual([c.status, c.audio, c.verified], ['noJapanese', ['en'], true]);
+    assert.deepEqual(c.notes, ['Audio 1 is tagged Japanese but sounds English']);
+    const ok = rules.classifyFile(file, {}, check([{ track: 1, tag: 'ja', lang: 'ja', p: 0.97 }, { track: 2, tag: 'en', lang: 'en', p: 0.95 }]));
+    assert.deepEqual([ok.status, ok.notes, ok.verified], ['dual', [], true]);
+  });
+
+  test('an unsure guess keeps the tag; an untagged track takes the guess', () => {
+    const c = rules.classifyFile(file, {}, check([{ track: 1, tag: 'ja', lang: 'en', p: 0.3 }, { track: 2, tag: null, lang: 'en', p: 0.9 }, { track: 3, tag: 'und', lang: null, p: 0 }]));
+    assert.deepEqual([c.status, c.audio], ['dual', ['ja', 'en', 'und']]);
+    assert.deepEqual(c.notes, ['Audio 2 has no language tag; it sounds English']);
+    // Untagged tracks Sonarr calls unknown become known.
+    const bare = { ...file, mediaInfo: { audioLanguages: '', subtitles: 'eng' } };
+    assert.equal(rules.classifyFile(bare, {}).status, 'unknown');
+    assert.equal(rules.classifyFile(bare, {}, check([{ track: 1, tag: null, lang: 'ja', p: 0.9 }])).status, 'subbed');
+    assert.equal(rules.classifyFile({ ...file, mediaInfo: null }, {}, check([{ track: 1, tag: null, lang: 'ja', p: 0.9 }])).status, 'subbed', 'even without media info');
+  });
+
+  test('signs & songs tracks are not subtitles; mislabelled ones are noted', () => {
+    const ja = [{ track: 1, tag: 'ja', lang: 'ja', p: 0.97 }];
+    const signs = rules.classifyFile(file, {}, check(ja, [{ track: 1, tag: 'en', lang: null, kind: 'signs' }]));
+    assert.deepEqual([signs.status, signs.subs, signs.notes], ['noSubs', [], ['Subtitles 1 (English) are signs & songs only']]);
+    const wrong = rules.classifyFile(file, { subtitleLanguage: 'en' }, check(ja, [{ track: 1, tag: 'en', lang: 'es', kind: 'full' }]));
+    assert.deepEqual([wrong.status, wrong.notes], ['noSubs', ['Subtitles 1 are tagged English but read as Spanish']]);
+    const untagged = rules.classifyFile(file, {}, check(ja, [{ track: 1, tag: null, lang: null, kind: 'full' }]));
+    assert.deepEqual([untagged.status, untagged.subs], ['subbed', ['und']]);
+  });
+
+  test('subtitles that weren’t read (not required at the time) keep their tags', () => {
+    const c = rules.classifyFile(file, { requireSubtitles: true }, { size: 100, audio: [{ track: 1, tag: 'ja', lang: 'ja', p: 0.9 }], subs: [], subsChecked: false });
+    assert.deepEqual([c.status, c.subs, c.verified], ['subbed', ['en'], true]);
+  });
+
+  test('a check of a different file (size changed), or one that failed, is ignored', () => {
+    const c = check([{ track: 1, tag: 'ja', lang: 'en', p: 0.95 }]);
+    const changed = rules.classifyFile(file, {}, { ...c, size: 99 });
+    assert.deepEqual([changed.status, changed.verified, changed.notes], ['dual', false, []]);
+    const failed = rules.classifyFile(file, {}, { size: 100, error: 'boom' });
+    assert.deepEqual([failed.status, failed.verified, failed.notes], ['dual', false, ['Couldn’t check the file: boom']]);
+    assert.deepEqual(rules.classifyFile(file, {}, { size: 1, error: 'old' }).notes, []);
+  });
+
+  test('summaries and totals count checked files', () => {
+    const row = rules.summariseSeries({ id: 1, title: 'x' }, [file, { ...file, id: 2 }], {}, new Map([[1, check([{ track: 1, tag: 'ja', lang: 'ja', p: 1 }])]]));
+    assert.equal(row.verified, 1);
+    assert.equal(rules.totals([row, { ...row, verified: undefined }]).verified, 1);
+  });
+});
+
+describe('reading files', () => {
+  test('clips come from the middle of the episode', () => {
+    assert.deepEqual(rules.clipStarts(1440), [432, 720, 1007]);
+    assert.deepEqual(rules.clipStarts(60), [0]);
+    assert.deepEqual(rules.clipStarts(0), [0]);
+    assert.deepEqual(rules.clipStarts(NaN), [0]);
+  });
+
+  test('audioLanguage: most probability wins, averaged over every clip', () => {
+    assert.deepEqual(rules.audioLanguage([{ lang: 'en', p: 0.95 }, { lang: 'ja', p: 0.6 }, { lang: 'en', p: 0.93 }]), { lang: 'en', p: 0.63 });
+    assert.deepEqual(rules.audioLanguage([{ lang: 'ja', p: 0.97 }, null, { lang: 'ja', p: 0.99 }]), { lang: 'ja', p: 0.65 });
+    assert.deepEqual(rules.audioLanguage([null]), { lang: null, p: 0 });
+    assert.deepEqual(rules.audioLanguage([]), { lang: null, p: 0 });
+  });
+
+  test('parseSrt strips styling and skips junk', () => {
+    const cues = rules.parseSrt('1\r\n00:00:01,500 --> 00:00:03,000\r\n{\\an8}<i>Hello</i>\\Nthere\r\n\r\n2\n01:02:03.250 --> 01:02:05,000\nSecond\nline\n\nnot a cue\n\n3\n00:00:09,000 --> 00:00:10,000\n{\\p1}\n');
+    assert.deepEqual(cues, [{ start: 1.5, text: 'Hello there' }, { start: 3723.25, text: 'Second line' }]);
+    assert.deepEqual(rules.parseSrt(''), []);
+    assert.deepEqual(rules.parseSrt(null), []);
+  });
+
+  test('dialogueRate counts distinct lines in the middle of the episode', () => {
+    const cues = [
+      { start: 10, text: 'Opening song' }, // before 15%
+      ...Array.from({ length: 60 }, (_, i) => ({ start: 200 + i * 10, text: `Line ${i % 50}` })),
+      { start: 1300, text: 'Ending song' }, // after 85%
+    ];
+    assert.deepEqual(rules.dialogueRate(cues, 1400), { lines: 50, perMin: 3.1 });
+    assert.deepEqual(rules.dialogueRate(cues, 0), { lines: 52, perMin: null });
+  });
+
+  test('subtitleKind: titles, forced flags, then how much it talks', () => {
+    assert.equal(rules.subtitleKind({ title: 'Signs & Songs' }, 12), 'signs');
+    assert.equal(rules.subtitleKind({ title: 'English [S&S]' }, 12), 'signs');
+    assert.equal(rules.subtitleKind({ title: 'Forced' }, null), 'signs');
+    assert.equal(rules.subtitleKind({ forced: true }, 12), 'signs');
+    assert.equal(rules.subtitleKind({ title: 'Full Subtitles (Dialogue + Signs)' }, 1), 'full');
+    assert.equal(rules.subtitleKind({ title: 'English' }, 1.5), 'signs');
+    assert.equal(rules.subtitleKind({ title: 'English' }, 12), 'full');
+    assert.equal(rules.subtitleKind({}, null), 'full', 'unknown rate: trust it');
+    assert.equal(rules.subtitleKind(undefined), 'full');
+  });
+
+  test('textLanguage', () => {
+    const say = (s) => `${s} `.repeat(3);
+    assert.equal(rules.textLanguage(say('I don’t know what you are talking about. We have to go now, it is not safe here. What do you want from me? This is the way, and you have to be ready for it.')), 'en');
+    assert.equal(rules.textLanguage(say('No sé de qué estás hablando. Tenemos que irnos ahora, no es seguro aquí. ¿Qué quieres de mí? Este es el camino y tienes que estar listo para eso.')), 'es');
+    assert.equal(rules.textLanguage(say('Eu não sei do que você está falando. Temos que ir agora, não é seguro aqui. O que você quer de mim? Este é o caminho e você tem que estar pronto para isso.')), 'pt');
+    assert.equal(rules.textLanguage(say('Je ne sais pas de quoi tu parles. Nous devons partir maintenant, ce n’est pas sûr ici. Qu’est-ce que vous voulez de moi? C’est la voie et tu dois être prêt.')), 'fr');
+    assert.equal(rules.textLanguage(say('Ich weiß nicht, wovon du redest. Wir müssen jetzt gehen, es ist hier nicht sicher. Was willst du von mir? Das ist der Weg und du musst bereit sein.')), 'de');
+    assert.equal(rules.textLanguage(say('Non so di cosa stai parlando. Dobbiamo andare adesso, non è sicuro qui. Cosa vuoi da me? Questo è il modo e tu devi essere pronto per questo.')), 'it');
+    assert.equal(rules.textLanguage(say('何を言っているのか分からない。今すぐ行かなきゃ、ここは危ない。私に何をしてほしいの？')), 'ja');
+    assert.equal(rules.textLanguage(say('무슨 말을 하는지 모르겠어요. 지금 가야 해요, 여기는 안전하지 않아요.')), 'ko');
+    assert.equal(rules.textLanguage(say('我不知道你在说什么。我们现在必须走了，这里不安全。你想从我这里得到什么？')), 'zh');
+    assert.equal(rules.textLanguage(say('Я не знаю, о чем ты говоришь. Нам нужно идти сейчас, здесь небезопасно.')), 'ru');
+    assert.equal(rules.textLanguage(say('لا أعرف ما الذي تتحدث عنه. علينا أن نذهب الآن، المكان هنا ليس آمنا.')), 'ar');
+    assert.equal(rules.textLanguage('Too short to tell'), null);
+    assert.equal(rules.textLanguage(say('Kamehameha Rasengan Chidori Bankai Zanpakuto Shinigami Hollow Quincy Arrancar')), null, 'no common words');
+    assert.equal(rules.textLanguage(null), null);
   });
 });
 
@@ -99,6 +216,7 @@ describe('series', () => {
       series: 5,
       files: { dual: 3, subbed: 4, noSubs: 2, noJapanese: 1, unknown: 1 },
       states: { done: 0, waiting: 1, problem: 3, unknown: 1, empty: 0 },
+      verified: 0,
     });
   });
 

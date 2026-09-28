@@ -57,6 +57,8 @@ const ICONS = {
   chev: '<path d="m9 6 6 6-6 6"/>',
   swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
   check: '<path d="m5 12 5 5L20 7"/>',
+  ear: '<path d="M6 8.5a6 6 0 1 1 12 0c0 3-2 4.5-3 5.5s-1 2-1 3a3 3 0 0 1-6 0"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
 };
 const icon = (n) => `<svg class="ico" viewBox="0 0 24 24">${ICONS[n]}</svg>`;
 
@@ -128,7 +130,11 @@ const JOBS = {
   search: 'Searching',
   replace: 'Replacing files',
   setup: 'Setting up Sonarr',
+  verify: 'Checking files',
+  'verify-test': 'Testing a file check',
 };
+const LANG_NAMES = { ja: 'Japanese', en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French', de: 'German', it: 'Italian', ar: 'Arabic', ru: 'Russian', zh: 'Chinese', ko: 'Korean', und: 'undetermined' };
+const langName = (c) => LANG_NAMES[c] || c || '—';
 
 const verdictBadge = (k, n, withLabel = true) =>
   `<span class="vb v-${k}" title="${esc(VERDICTS[k][1])}"><i></i>${n !== undefined ? `${n.toLocaleString()}${withLabel ? ' ' : ''}` : ''}${withLabel ? esc(VERDICTS[k][0]) : ''}</span>`;
@@ -178,8 +184,9 @@ async function pollStatus() {
     renderStatus();
     if (wasRunning && !state.status.running) {
       const r = state.status.lastRun;
-      if (['scan', 'schedule', 'rules'].includes(r?.trigger)) {
-        toast(r.status === 'ok' ? 'Scan finished' : r.status === 'error' ? `Scan failed: ${r.summary?.error}` : 'Scan finished with warnings — see Activity', r.status === 'error');
+      if (['scan', 'schedule', 'rules', 'verify'].includes(r?.trigger)) {
+        const what = r.trigger === 'verify' ? 'Checking files' : 'Scan';
+        toast(r.status === 'ok' ? `${what} finished` : r.status === 'error' ? `${what} failed: ${r.summary?.error}` : `${what} finished with warnings — see Activity`, r.status === 'error');
       }
       if (/^#\/?$|^#\/activity|^$/.test(location.hash)) route();
     }
@@ -281,7 +288,9 @@ async function viewLibrary(token) {
       <div class="tile" style="--c:var(--err)"><b>${t.states.problem.toLocaleString()}</b><span>With problems</span></div>
       <div class="tile" style="--c:var(--faint)"><b>${(t.states.unknown + t.states.empty).toLocaleString()}</b><span>Unknown or empty</span></div>
     </div>
-    <div class="file-counts"><span>${plural(totalFiles, 'file')}:</span>${Object.keys(VERDICTS).map((k) => verdictBadge(k, t.files[k])).join('')}</div>`;
+    <div class="file-counts"><span>${plural(totalFiles, 'file')}:</span>${Object.keys(VERDICTS).map((k) => verdictBadge(k, t.files[k])).join('')}${
+      t.verified ? `<span class="faint" title="Listened to and read by Dualarr, not just their tags">· ${plural(t.verified, 'file')} checked</span>` : ''
+    }</div>`;
 
   const unknownHint = () =>
     t.files.unknown && t.files.unknown >= Math.max(5, totalFiles * 0.1)
@@ -316,11 +325,16 @@ async function viewLibrary(token) {
   const detailHtml = (s, detail) => {
     if (!detail) return loadingBlock('Loading files…');
     if (detail.error) return `<div class="detail-head" style="color:var(--err)">${esc(detail.error)}</div>`;
-    const files = detail.files.filter((f) => f.status !== 'dual');
+    // Dual audio files are only listed when checking them found something off.
+    const files = detail.files.filter((f) => f.status !== 'dual' || f.notes?.length);
     const bad = files.filter((f) => REPLACEABLE.includes(f.status));
+    const notDual = files.filter((f) => f.status !== 'dual').length;
     const head = `<div class="detail-head">
-        <span>${files.length ? `${plural(files.length, 'file')} without dual audio` : 'Every file has dual audio.'}</span>
+        <span>${notDual ? `${plural(notDual, 'file')} without dual audio` : 'Every file has dual audio.'}${
+          state.settings.verify ? ` · ${detail.verified || 0} of ${plural(detail.total, 'file')} checked` : ''
+        }</span>
         <span class="spacer"></span>
+        ${state.settings.verify ? `<button class="btn btn-sm" type="button" data-verify="${s.id}" title="Listen to the audio and read the subtitles of every file again">${icon('ear')}Check files</button>` : ''}
         ${bad.length > 1 ? `<button class="btn btn-sm btn-danger" type="button" data-replace="${s.id}" data-files="${bad.map((f) => f.id).join(',')}">${icon('swap')}Replace all ${bad.length}</button>` : ''}
       </div>`;
     if (!files.length) return head;
@@ -331,10 +345,12 @@ async function viewLibrary(token) {
           .map(
             (f) => `<tr>
               <td class="mono">${esc(f.season)}</td>
-              <td><div class="path">${esc(f.path)}</div>${f.release ? `<div class="rel">${esc(f.release)}</div>` : ''}${f.quality ? `<div class="rel">${esc(f.quality)}${f.score ? ` · score ${esc(f.score)}` : ''}</div>` : ''}</td>
+              <td><div class="path">${esc(f.path)}</div>${f.release ? `<div class="rel">${esc(f.release)}</div>` : ''}${f.quality ? `<div class="rel">${esc(f.quality)}${f.score ? ` · score ${esc(f.score)}` : ''}</div>` : ''}${
+                (f.notes || []).map((n) => `<div class="note">${esc(n)}</div>`).join('')
+              }</td>
               <td class="langs">${esc(langsText(f.audio))}</td>
               <td class="langs">${esc(langsText(f.subs))}</td>
-              <td>${verdictBadge(f.status)}</td>
+              <td>${verdictBadge(f.status)}${f.verified ? `<div class="checked" title="Dualarr listened to the audio and read the subtitles">${icon('check')}checked</div>` : ''}</td>
               <td style="text-align:right">${REPLACEABLE.includes(f.status) ? `<button class="btn btn-sm btn-danger" type="button" data-replace="${s.id}" data-files="${f.id}" title="Blocklist this release, delete the file and search again">${icon('swap')}Replace</button>` : ''}</td>
             </tr>`,
           )
@@ -364,6 +380,7 @@ async function viewLibrary(token) {
     <div class="page-head">
       <div><h1>Library</h1><p>${scanned ? `${plural(t.series, 'series', 'series')} checked · last scan ${esc(ago(lib.series.reduce((m, s) => (s.scannedAt > m ? s.scannedAt : m), '')))}` : 'Not scanned yet.'}</p></div>
       <div class="page-actions">
+        ${scanned && state.settings.verify ? `<button class="btn" type="button" id="verify-now" title="Check the next ${state.settings.verifyPerRun} files that haven’t been checked">${icon('ear')}Check files now</button>` : ''}
         ${scanned ? `<button class="btn" type="button" id="search-all"${searchable().length ? '' : ' disabled'}>${icon('search')}Search all that need it</button>` : ''}
         <button class="btn btn-primary${running ? ' loading' : ''}" type="button" id="scan-now"${running ? ' disabled' : ''}>${icon('refresh')}Scan now</button>
       </div>
@@ -404,6 +421,17 @@ async function viewLibrary(token) {
         toast('Scanning the library…');
         b.disabled = true;
         b.classList.add('loading');
+        watchJob();
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
+    if (b.id === 'verify-now' || b.dataset.verify) {
+      try {
+        await api('/api/verify', { method: 'POST', body: b.dataset.verify ? { seriesIds: [Number(b.dataset.verify)], force: true } : {} });
+        toast('Checking files — this can take a while');
+        b.disabled = true;
         watchJob();
       } catch (err) {
         toast(err.message, true);
@@ -561,7 +589,7 @@ async function viewSettings() {
               <select class="select" id="sub-lang" name="subtitleLanguage">
                 ${Object.entries(SUBTITLE_LANGUAGES).map(([k, v]) => `<option value="${k}"${s.subtitleLanguage === k ? ' selected' : ''}>${v}</option>`).join('')}
               </select>
-              <span class="hint">A signs & songs track looks the same as full subtitles to Sonarr, so it counts too.</span>
+              <span class="hint">To Sonarr, a signs & songs track looks the same as full subtitles, so it counts too — unless <b>Check files</b> is on.</span>
             </div>
           </div>
         </div>
@@ -569,6 +597,46 @@ async function viewSettings() {
         <div class="panel wide" id="setup-panel">
           <div class="panel-head"><div><h2>Sonarr setup</h2><p>Two custom formats that make Sonarr prefer dual audio and never grab an English-only dub, scored in the quality profiles you pick.</p></div></div>
           <div class="panel-body" id="setup-body">${sonarrConnected() ? loadingBlock('Reading Sonarr’s quality profiles…') : '<span class="hint">Connect Sonarr above and save first.</span>'}</div>
+        </div>
+
+        <div class="panel wide" id="verify-panel">
+          <div class="panel-head"><div><h2>Check files</h2><p>Don’t just trust the language tags: listen to each file’s audio and read its subtitles. Catches mislabelled releases, untagged tracks and signs & songs–only subtitles.</p></div></div>
+          <div class="panel-body">
+            <label class="check"><input type="checkbox" name="verify"${s.verify ? ' checked' : ''} />
+              <span><b>Check files</b><span class="hint">Each file is checked once (and again if it changes), during the scheduled scan — new files first — or with “Check files now” in the Library. ffmpeg cuts three 30-second clips from the middle of every audio track and whisper.cpp says which language is spoken.</span></span></label>
+            <div id="verify-status">${loadingBlock('Looking for ffmpeg, whisper.cpp and GPUs…')}</div>
+            <div class="row wrap">
+              <div class="field">
+                <label for="verify-device">Run on</label>
+                <select class="select" id="verify-device" name="verifyDevice">
+                  <option value="auto"${s.verifyDevice === 'auto' ? ' selected' : ''}>Automatic — a GPU if there is one</option>
+                  <option value="cpu"${s.verifyDevice === 'cpu' ? ' selected' : ''}>CPU only</option>
+                  ${/^gpu:/.test(s.verifyDevice) ? `<option value="${esc(s.verifyDevice)}" selected>GPU ${esc(s.verifyDevice.slice(4))}</option>` : ''}
+                </select>
+              </div>
+              <div class="field">
+                <label for="verify-model">Whisper model</label>
+                <select class="select" id="verify-model" name="verifyModel">
+                  ${[['tiny', 'Tiny (75 MB) — fastest'], ['base', 'Base (142 MB) — recommended'], ['small', 'Small (466 MB) — most accurate']].map(([k, l]) => `<option value="${k}"${s.verifyModel === k ? ' selected' : ''}>${l}</option>`).join('')}
+                </select>
+              </div>
+              <div class="field">
+                <label for="verify-per-run">Files per scheduled scan</label>
+                <input class="input" id="verify-per-run" name="verifyPerRun" type="number" min="1" max="5000" value="${esc(s.verifyPerRun)}" />
+              </div>
+            </div>
+            <div class="field">
+              <span class="label">Path mappings <span class="label-note">— only if this container sees your anime at a different path than Sonarr does</span></span>
+              <div id="mappings" class="mappings"></div>
+              <div class="row" style="flex:none"><button type="button" class="btn btn-sm" id="map-add" style="flex:none">${icon('plus')}Add mapping</button><span class="hint">E.g. Sonarr’s <code>/tv/anime</code> → <code>/media/anime</code> here. Mount your media read-only.</span></div>
+              <div id="roots"></div>
+            </div>
+            <div class="row" style="flex:none">
+              <button type="button" class="btn btn-sm" id="verify-test" style="flex:none">${icon('ear')}Test on one file</button>
+              <span class="hint">Save first. Checks the first file it can find (downloading the model the first time) and shows what it heard.</span>
+            </div>
+            <div id="verify-result"></div>
+          </div>
         </div>
 
         <div class="panel">
@@ -709,6 +777,81 @@ async function viewSettings() {
     });
   renderNotifiers();
 
+  // --- checking files ---
+  const mappings = structuredClone(s.pathMappings || []);
+  const readMappings = () =>
+    [...form.querySelectorAll('.mapping')].map((el) => ({ from: el.querySelector('[data-map="from"]').value, to: el.querySelector('[data-map="to"]').value }));
+  const renderMappings = () => {
+    form.querySelector('#mappings').innerHTML = mappings
+      .map(
+        (m, i) => `<div class="mapping row" data-i="${i}">
+          <input class="input mono" data-map="from" value="${esc(m.from)}" placeholder="Sonarr’s path, e.g. /tv/anime" />
+          <span class="arrow">→</span>
+          <input class="input mono" data-map="to" value="${esc(m.to)}" placeholder="Path here, e.g. /media/anime" />
+          <button type="button" class="btn btn-sm btn-ghost btn-icon btn-danger" data-map-remove="${i}" title="Remove">${icon('x')}</button>
+        </div>`,
+      )
+      .join('');
+  };
+  renderMappings();
+
+  const IMAGE = { cuda: 'CUDA build — NVIDIA GPUs', vulkan: 'Vulkan build — Intel, AMD and NVIDIA GPUs' };
+  const renderVerify = (v) => {
+    const t = v.tools;
+    const ok = (yes, text) => `<li class="${yes ? 'ok' : 'bad'}">${icon(yes ? 'check' : 'x')}<span>${text}</span></li>`;
+    const real = t.devices.filter((d) => !d.software);
+    const noGpuHint =
+      t.gpu === 'cuda'
+        ? 'No NVIDIA GPU is visible. Start the container with <code>--runtime=nvidia</code> and <code>NVIDIA_VISIBLE_DEVICES</code> (the NVIDIA template does this).'
+        : t.gpu === 'vulkan'
+          ? 'No GPU is visible. For an Intel or AMD iGPU, pass <code>/dev/dri</code> to the container. For an NVIDIA card, use the <code>latest-cuda</code> image.'
+          : 'No GPU is visible.';
+    const d = v.download;
+    const downloading = d && !d.done && d.model === v.model.name;
+    form.querySelector('#verify-status').innerHTML = `
+      <ul class="checklist">
+        ${ok(!!t.ffmpeg, t.ffmpeg ? esc(t.ffmpeg) : 'ffmpeg isn’t installed — it comes with the Dualarr Docker image')}
+        ${ok(!!t.whisper, t.whisper ? `whisper.cpp ${esc(t.whisper)}${t.gpu ? ` · ${IMAGE[t.gpu] || esc(t.gpu)}` : ''}` : 'whisper.cpp isn’t installed — it comes with the Dualarr Docker image')}
+        ${ok(real.length > 0, real.length ? `GPU${real.length > 1 ? 's' : ''}: ${real.map((x) => `<b>${esc(x.name)}</b> <span class="faint">(${esc(x.backend)}${x.detail ? `, ${esc(x.detail)}` : ''})</span>`).join(', ')}` : `${noGpuHint} Checking runs on the CPU until then.`)}
+        ${ok(v.model.present, v.model.present ? `Model <b>${esc(v.model.name)}</b> downloaded (${Math.round(v.model.bytes / 1e6)} MB)` : downloading ? `Downloading the <b>${esc(d.model)}</b> model… ${d.total ? Math.floor((d.received / d.total) * 100) : 0}%` : `The <b>${esc(v.model.name)}</b> model isn’t downloaded yet ${d?.error && d.model === v.model.name ? `<span class="err-text">(${esc(d.error)})</span> ` : ''}<button type="button" class="btn btn-sm" id="model-download">Download now</button>`)}
+      </ul>
+      <div class="row" style="flex:none"><span class="hint" style="flex:1">Checks run on: <b>${esc(v.device)}</b></span><button type="button" class="btn btn-sm btn-ghost" id="verify-recheck" style="flex:none">${icon('refresh')}Look again</button></div>`;
+    // The device list, now that the GPUs are known.
+    const sel = form.querySelector('#verify-device');
+    const cur = sel.value;
+    sel.innerHTML = [
+      ['auto', `Automatic — ${real.length ? real[0].name : 'the CPU (no GPU found)'}`],
+      ['cpu', 'CPU only'],
+      ...t.devices.map((x) => [`gpu:${x.index}`, `${x.name} (${x.backend}${x.software ? ', software — slow' : ''})`]),
+      ...(/^gpu:/.test(cur) && !t.devices.some((x) => `gpu:${x.index}` === cur) ? [[cur, `GPU ${cur.slice(4)} — not found, uses the CPU`]] : []),
+    ]
+      .map(([k, l]) => `<option value="${esc(k)}"${k === cur ? ' selected' : ''}>${esc(l)}</option>`)
+      .join('');
+    form.querySelector('#roots').innerHTML = v.roots.length
+      ? `<ul class="checklist">${v.roots
+          .map((r) => ok(r.visible, `Sonarr’s <code>${esc(r.path)}</code>${r.mapped !== r.path ? ` → <code>${esc(r.mapped)}</code>` : ''} ${r.visible ? 'is visible here' : 'isn’t visible in this container'}`))
+          .join('')}</ul>`
+      : '';
+    if (downloading) setTimeout(loadVerify, 1000);
+  };
+  const loadVerify = (refresh = false) =>
+    api(`/api/verify${refresh ? '?refresh=1' : ''}`)
+      .then(renderVerify)
+      .catch((err) => (form.querySelector('#verify-status').innerHTML = `<span class="test-result err">${esc(err.message)}</span>`));
+  loadVerify();
+
+  const showTest = (r) => {
+    const pct = (p) => `${Math.round(p * 100)}%`;
+    const audio = r.check.audio.map((a) => `Audio ${a.track}: <b>${esc(a.lang ? langName(a.lang) : 'couldn’t tell')}</b>${a.lang ? ` (${pct(a.p)})` : ''} <span class="faint">tagged ${esc(langName(a.tag))}</span>`);
+    const subs = r.check.subs.map((t) => `Subtitles ${t.track}: <b>${esc(t.lang ? langName(t.lang) : langName(t.tag))}</b>, ${t.kind === 'signs' ? 'signs & songs only' : 'full'}${t.perMin !== null ? ` <span class="faint">(${t.perMin} lines/min)</span>` : ''}`);
+    form.querySelector('#verify-result').innerHTML = `<div class="test-box">
+      <div><b>${esc(r.title)}</b> <span class="faint">${esc(r.file)}</span></div>
+      <ul>${[...audio, ...subs].map((x) => `<li>${x}</li>`).join('') || '<li>No audio or subtitle tracks</li>'}</ul>
+      <div>${verdictBadge(r.status)} ${r.notes.map((n) => `<div class="note">${esc(n)}</div>`).join('')}</div>
+      <div class="hint">${r.check.seconds} s on ${esc(r.device)}</div>
+    </div>`;
+  };
+
   form.querySelector('#sched-preset').addEventListener('change', (e) => {
     const custom = e.target.value === 'custom';
     form.querySelector('#cron-field').classList.toggle('hidden', !custom);
@@ -730,6 +873,11 @@ async function viewSettings() {
       notifyUpgrades: fd.get('notifyUpgrades') === 'on',
       notifyProblems: fd.get('notifyProblems') === 'on',
       notifiers: readNotifiers(),
+      verify: fd.get('verify') === 'on',
+      verifyDevice: fd.get('verifyDevice'),
+      verifyModel: fd.get('verifyModel'),
+      verifyPerRun: Number(fd.get('verifyPerRun')),
+      pathMappings: readMappings(),
     };
   };
 
@@ -778,6 +926,35 @@ async function viewSettings() {
       state.settings = await api('/api/settings', { method: 'PUT', body: { clearSonarrApiKey: true } });
       toast('API key removed');
       return viewSettings();
+    }
+    if (b.id === 'map-add') {
+      mappings.splice(0, mappings.length, ...readMappings(), { from: '', to: '' });
+      renderMappings();
+      return;
+    }
+    if (b.dataset.mapRemove) {
+      mappings.splice(0, mappings.length, ...readMappings());
+      mappings.splice(Number(b.dataset.mapRemove), 1);
+      renderMappings();
+      return;
+    }
+    if (b.id === 'verify-recheck') return loadVerify(true);
+    if (b.id === 'model-download') {
+      await api('/api/verify/model', { method: 'POST', body: { model: form.querySelector('#verify-model').value } }).catch((err) => toast(err.message, true));
+      return loadVerify();
+    }
+    if (b.id === 'verify-test') {
+      const out = form.querySelector('#verify-result');
+      out.innerHTML = loadingBlock('Checking a file… the first time this also downloads the model');
+      b.disabled = true;
+      try {
+        showTest(await api('/api/verify/test', { method: 'POST' }));
+      } catch (err) {
+        out.innerHTML = `<span class="test-result err">${esc(err.message)}</span>`;
+      }
+      b.disabled = false;
+      loadVerify();
+      return;
     }
     if (b.id === 'setup-apply') {
       const profileIds = [...form.querySelectorAll('[data-profile]:checked')].map((c) => Number(c.dataset.profile));
@@ -848,7 +1025,7 @@ async function viewSettings() {
 async function viewActivity() {
   const runs = await api('/api/runs');
   view.innerHTML = `
-    <div class="page-head"><div><h1>Activity</h1><p>Scans, searches, replacements and Sonarr setup.</p></div></div>
+    <div class="page-head"><div><h1>Activity</h1><p>Scans, file checks, searches, replacements and Sonarr setup.</p></div></div>
     <div class="panel">
       ${
         runs.length
@@ -861,7 +1038,7 @@ async function viewActivity() {
     </div>`;
 }
 
-const TRIGGERS = { schedule: 'Scheduled scan', scan: 'Scan', rules: 'Rescan (rules)', search: 'Search', replace: 'Replace', setup: 'Sonarr setup' };
+const TRIGGERS = { schedule: 'Scheduled scan', scan: 'Scan', rules: 'Rescan (rules)', search: 'Search', replace: 'Replace', setup: 'Sonarr setup', verify: 'Check files', 'verify-test': 'Check test' };
 const titles = (list, fmt) => list.map(fmt).join(', ');
 
 function runRow(r) {
@@ -875,6 +1052,13 @@ function runRow(r) {
   if (s.problems?.length) {
     lines.push(`<span style="color:var(--warn)">New problems: ${esc(titles(s.problems, (p) => `${p.title} (${[p.noJapanese && `${p.noJapanese} no Japanese`, p.noSubs && `${p.noSubs} no subs`].filter(Boolean).join(', ')})`))}</span>`);
   }
+  if (s.verified) {
+    const v = s.verified;
+    lines.push(`<span>Checked ${plural(v.files, 'file')} on ${esc(v.device)}${v.seconds !== undefined ? ` in ${v.seconds < 120 ? `${v.seconds}s` : `${Math.round(v.seconds / 60)} min`}` : ''}${v.failed ? `, ${v.failed} couldn’t be read` : ''}</span>`);
+    for (const m of v.mismatches.slice(0, 10)) lines.push(`<span style="color:var(--warn)">${esc(m.title)} — ${esc(m.file.split('/').pop())}: ${esc(m.notes.join('; '))}</span>`);
+    if (v.mismatches.length > 10) lines.push(`<span class="faint">…and ${v.mismatches.length - 10} more files that disagree with their tags</span>`);
+  }
+  if (s.tested) lines.push(`<span>Tested on ${esc(s.tested.title)} — ${esc(s.tested.file.split('/').pop())}: ${s.tested.seconds}s on ${esc(s.tested.device)}</span>`);
   if (s.searched?.length) lines.push(`<span>Searched: ${esc(titles(s.searched, (x) => x.title))}</span>`);
   else if (s.searched && r.trigger === 'schedule') lines.push('<span class="faint">Nothing due for a search</span>');
   if (s.replaced) lines.push(`<span>${esc(s.replaced.title)}: deleted ${plural(s.replaced.files, 'file')}, blocklisted ${s.replaced.blocklisted}, searching ${plural(s.replaced.episodes, 'episode')}</span>`);

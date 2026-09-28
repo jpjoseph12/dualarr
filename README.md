@@ -23,7 +23,8 @@ Dualarr is a companion to Sonarr, and a sibling of [Courarr](https://github.com/
    - **Search** asks Sonarr to look for better releases. A season where every file needs work gets one season search, which finds batch releases (where dual audio usually turns up); otherwise the monitored episodes are searched one by one.
    - The **nightly scan** also searches a few series (10 by default), least recently searched first, and waits a week before searching the same series again. A big library is worked through over a few nights without hammering your indexers.
    - **Replace** is for files that break the rules (no Japanese audio, or no subtitles). It marks the release that produced the file as failed in Sonarr (so it is blocklisted), deletes the file and searches for the episode again.
-4. **Notifications** (Discord, Telegram, ntfy, Gotify or a JSON webhook) when files are upgraded to dual audio, when new files break the rules, and when a scheduled scan can't reach Sonarr.
+4. **Checking the files themselves (optional).** Language tags can be wrong. With [Check files](#check-files) on, Dualarr listens to each audio track with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads the subtitles, on the CPU or a GPU. That catches mislabelled releases, untagged tracks and signs & songs-only subtitles.
+5. **Notifications** (Discord, Telegram, ntfy, Gotify or a JSON webhook) when files are upgraded to dual audio, when new files break the rules, and when a scheduled scan can't reach Sonarr.
 
 ## Before you start: turn on "Analyse video files" in Sonarr
 
@@ -42,7 +43,13 @@ Once Dualarr is listed in Community Applications: **Apps** → search **Dualarr*
   then **Docker** tab → **Add Container** → **Template** → **Dualarr** (under *User templates*) → **Apply**.
 - **Unraid 6**: **Docker** tab → **Template repositories** (at the bottom) → add `https://github.com/jpjoseph12/dualarr` → **Save**, then **Add Container** → **Template** → **Dualarr** → **Apply**.
 
-The defaults are fine: web UI on port **6162**, settings in `/mnt/user/appdata/dualarr`, running as `99:100`. Unraid sets `TZ` for you.
+There are two templates. **Dualarr** is for checking files on the CPU or an Intel/AMD iGPU. **Dualarr-NVIDIA** is for servers with an NVIDIA card; on Unraid 7 its command is
+```bash
+mkdir -p /boot/config/plugins/dockerMan/templates-user && wget -qO /boot/config/plugins/dockerMan/templates-user/my-Dualarr-NVIDIA.xml https://raw.githubusercontent.com/jpjoseph12/dualarr/main/templates/dualarr-nvidia.xml
+```
+See [Check files](#check-files) for the GPU settings.
+
+The defaults are fine: web UI on port **6162**, settings in `/mnt/user/appdata/dualarr`, running as `99:100`. Unraid sets `TZ` for you. **Media** (your anime folder, read-only) is only needed for Check files.
 
 ### Docker Compose
 
@@ -60,9 +67,10 @@ services:
       - PGID=1000
     volumes:
       - ./config:/config
+      # - /srv/media/tv:/tv:ro   # for Check files: your anime, read-only
 ```
 
-`docker compose up -d`, then open `http://<server>:6162`.
+`docker compose up -d`, then open `http://<server>:6162`. [`docker-compose.yml`](docker-compose.yml) also has the lines for an iGPU and for NVIDIA.
 
 | Variable | Default | |
 |---|---|---|
@@ -80,6 +88,42 @@ services:
 4. Back in the **Library**, **Search all that need it** starts the first round of searches. After that the nightly scan takes over.
 
 ![Settings](docs/screenshots/settings.png)
+
+## Check files
+
+Sonarr only knows what a file's tracks are *labelled*. Some releases get that wrong: an English dub tagged Japanese, a Japanese track with no tag at all, or an "English" subtitle track that only has the signs and song lyrics. With **Settings → Check files** on, Dualarr checks each file itself:
+
+- **Audio.** ffmpeg cuts three 30-second clips from the middle of each audio track, at 30%, 50% and 70% of the episode. The middle matters because dubs keep the Japanese opening and ending songs. whisper.cpp then says which language each clip is. A track's language is the one with the most confidence over its clips; if whisper isn't at least 50% sure, the tag stands.
+- **Subtitles.** Each text track (SRT, ASS, …) is read. Its language comes from the text, and its lines per minute in the middle of the episode tell full dialogue (usually 8–20 a minute) from signs & songs (a handful). Picture-based subtitles (Blu-ray PGS, DVD) can't be read, but their events are counted the same way. A track titled "Signs", "Songs" or "Forced" is signs & songs.
+- What a check finds replaces the tags in that file's verdict, and anything that disagreed shows under the file in the Library. For example: *Audio 1 is tagged Japanese but sounds English*, or *Subtitles 2 (English) are signs & songs only*.
+
+Each file is checked once, and again only if it changes. The nightly scan checks up to 100 (by default) not-yet-checked files, newest first, before it works out the verdicts. So it notifies you about what it found, and the backlog of an existing library is worked through over a few nights. **Check files now** in the Library does the next batch straight away, and **Check files** on a series checks all of its files again.
+
+![Check files](docs/screenshots/check-files.png)
+
+### Setting it up
+
+1. **Give Dualarr your anime, read-only.** On Unraid, fill in **Media** in the template. With Compose, add a volume. The easiest setup uses the same container path Sonarr uses (if Sonarr sees `/tv/anime`, mount the same host folder at `/tv` in Dualarr too). Otherwise add a **path mapping** in Settings, such as Sonarr's `/tv/anime` → `/media/anime`. Settings shows whether each of Sonarr's root folders is visible.
+2. **Turn on Check files** and pick where it runs (below). **Test on one file** checks the first file it can find and shows what it heard.
+3. The first check downloads the whisper model (once) into `/config/models` from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp). **Base** (142 MB) is a good default; **Tiny** (75 MB) is faster; **Small** (466 MB) is more accurate. Everything else runs locally.
+
+### CPU, iGPU or NVIDIA GPU
+
+whisper.cpp runs on the CPU in every image, and on a GPU when the container can see one. **Settings → Check files** lists the GPUs it found. **Run on** can be *Automatic* (the first GPU, else the CPU), *CPU only*, or a specific GPU.
+
+| Hardware | Image / Unraid template | What to add |
+|---|---|---|
+| CPU only | `latest` / **Dualarr** | Nothing |
+| Intel or AMD integrated GPU (or an AMD card) | `latest` / **Dualarr** | Pass `/dev/dri`. In the Unraid template, set **iGPU (Intel/AMD)** to `/dev/dri`. With Compose, uncomment the `devices:` lines. Runs through Vulkan. |
+| NVIDIA GPU (GTX 900 series and newer) | `latest-cuda` / **Dualarr-NVIDIA** | Unraid: install the **Nvidia-Driver** plugin, then the Dualarr-NVIDIA template (it sets `--runtime=nvidia` and `NVIDIA_VISIBLE_DEVICES`). Elsewhere: the NVIDIA Container Toolkit and the `deploy:` lines in the Compose file. Runs through CUDA. |
+
+Notes:
+
+- **GTX 10 series (e.g. a GTX 1050 Ti):** supported. The CUDA image is built with CUDA 12 for this reason, because CUDA 13 dropped these cards. NVIDIA's 580 driver branch is the last to support them, so keep the Nvidia-Driver plugin on a 580 driver (not a newer branch). A 4 GB card runs any of the three models.
+- **One NVIDIA card for several containers** (Plex, Jellyfin, Tdarr…) is fine. The checks only use it for a few seconds per file.
+- **The `latest` image and NVIDIA:** its Vulkan build can also use an NVIDIA card when `NVIDIA_DRIVER_CAPABILITIES` includes `graphics`, but the CUDA image is the supported way.
+- **No GPU?** The CPU works too, just slower. The nightly batch is limited (**Files per scheduled scan**), so only the size of the first backlog really depends on speed.
+- The container adds itself to the groups that own `/dev/dri` (`video`/`render`), so it doesn't need to run privileged.
 
 ## How the custom formats work
 
@@ -109,7 +153,8 @@ Changing a rule rescans the library, without sending notifications.
 
 - **Quality comes first.** Sonarr ranks quality above custom format score. A dual audio release at a lower quality than your current file (a 720p dual audio release against a 1080p subbed file, say) won't replace it. Allow the qualities you would accept for dual audio in the profile.
 - **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
-- **Signs & songs tracks count as subtitles.** Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
+- **Signs & songs tracks count as subtitles** unless [Check files](#check-files) is on. Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
+- **Checks are good, not perfect.** A clip with only music or silence can be misheard. That is why there are three clips and a confidence threshold, and why an unsure result keeps the tag. Text subtitle languages are recognised for English, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Japanese, Chinese and Korean. Reading subtitles means reading the whole file once, which is the slow part on spinning disks.
 - **Very high scores in other formats.** If another custom format in a profile scores more than the dual audio score, a subbed release with it could beat a dual audio one. Raise the dual audio score above it. The setup panel flags this, and also flags a profile where another format scores so high (10000 or more) that a dub-only release could still be grabbed.
 - **Unknown files are skipped.** Files without media info are never searched or replaced. See [Analyse video files](#before-you-start-turn-on-analyse-video-files-in-sonarr).
 
@@ -135,7 +180,7 @@ Node 24 (22.13+ works), no build step.
 ```sh
 npm install
 npm run dev             # http://localhost:6162, settings in ./.config
-npm test                # unit and API tests against a local stand-in Sonarr
+npm test                # unit and API tests against a local stand-in Sonarr (install ffmpeg to run the file-check tests)
 npm run test:coverage   # the same, with the coverage thresholds CI enforces
 node test/fixtures/mock-sonarr.mjs   # a stand-in Sonarr on :8989 (API key "sonarrkey") to click around with
 npm run icon            # redraw public/icon.png after changing the logo

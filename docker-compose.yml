@@ -2,7 +2,7 @@
 # Start:  docker compose up -d      Update:  docker compose pull && docker compose up -d
 services:
   dualarr:
-    image: ghcr.io/jpjoseph12/dualarr:latest
+    image: ghcr.io/jpjoseph12/dualarr:latest        # NVIDIA GPU: ghcr.io/jpjoseph12/dualarr:latest-cuda
     container_name: dualarr
     restart: unless-stopped
     ports:
@@ -12,4 +12,20 @@ services:
       - PUID=1000              # user that owns ./config  (run `id -u`)
       - PGID=1000              # group that owns ./config (run `id -g`)
     volumes:
-      - ./config:/config       # database (settings, login, last scan) — keep it!
+      - ./config:/config       # database (settings, login, last scan, whisper model) — keep it!
+      # For "Check files": your anime, read-only. Using the same path Sonarr uses inside its
+      # container (here /tv) means no path mapping is needed.
+      # - /srv/media/tv:/tv:ro
+
+    # Check files on an Intel or AMD integrated GPU:
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    # Check files on an NVIDIA GPU (with the latest-cuda image and the NVIDIA Container Toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
