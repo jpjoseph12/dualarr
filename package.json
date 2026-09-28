@@ -1,0 +1,24 @@
+{
+  "name": "dualarr",
+  "version": "0.1.0",
+  "description": "Keeps anime in Sonarr in Japanese with subtitles, and swaps subbed releases for dual audio when the dub comes out.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "CONFIG_DIR=./.config node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\"",
+    "icon": "node tools/make-icon.mjs",
+    "test:coverage": "node --disable-warning=ExperimentalWarning --test --experimental-test-coverage --test-coverage-include=\"server/**\" --test-coverage-exclude=\"server/index.js\" --test-coverage-lines=90 --test-coverage-branches=75 --test-coverage-functions=85 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=lcov.info \"test/*.test.js\"",
+    "test:ui": "node --check public/app.js"
+  },
+  "dependencies": {
+    "croner": "^9.1.0",
+    "express": "^5.1.0"
+  }
+}

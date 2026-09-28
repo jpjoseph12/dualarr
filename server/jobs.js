@@ -1,0 +1,246 @@
+// Everything that talks to Sonarr on the user's behalf: scanning the library, searching for dual
+// audio, replacing files that break the rules, and setting up the custom formats. Jobs run one
+// at a time and each is recorded in the activity log.
+import { sonarrClient } from './sonarr.js';
+import * as rules from './rules.js';
+import * as store from './db.js';
+import { notifyAll } from './notify.js';
+import { log } from './config.js';
+
+let queue = Promise.resolve();
+let running = null;
+/** The trigger of the job in progress (e.g. 'schedule', 'scan'), or null. */
+export const currentJob = () => running;
+
+/** Runs `work(summary, client, settings)` after any job in progress; resolves with its run. */
+export function job(trigger, work) {
+  const p = queue.then(async () => {
+    running = trigger;
+    const runId = store.startRun(trigger);
+    const summary = { warnings: [] };
+    let status = 'ok';
+    let result;
+    try {
+      const settings = store.getSettings();
+      const client = sonarrClient(settings);
+      if (!client) throw new Error('Connect Sonarr in Settings first');
+      result = await work(summary, client, settings);
+      if (summary.warnings.length) status = 'partial';
+    } catch (e) {
+      status = 'error';
+      summary.error = e.message;
+      log(`${trigger} failed: ${e.message}`);
+    } finally {
+      store.finishRun(runId, status, summary);
+      running = null;
+    }
+    return { runId, status, summary, result };
+  });
+  queue = p.catch(() => {});
+  return p;
+}
+
+const ruleOptions = (s) => ({ requireSubtitles: s.requireSubtitles, subtitleLanguage: s.subtitleLanguage });
+
+/** Runs `fn` over `items` with at most `n` in flight. */
+async function pool(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+  return out;
+}
+
+// ---------- scanning ----------
+
+/** Re-reads every in-scope series' files from Sonarr and stores the verdicts. */
+export async function scanLibrary(client, settings, summary) {
+  const all = await client.series();
+  const wanted = all.filter((s) => rules.inScope(s, settings.scope));
+  const prev = new Map(store.listSeries().map((s) => [s.id, s]));
+  const opts = ruleOptions(settings);
+  const rows = await pool(wanted, 4, async (s) => {
+    try {
+      const row = rules.summariseSeries(s, await client.episodeFiles(s.id), opts);
+      store.saveSeries(row);
+      return row;
+    } catch (e) {
+      summary.warnings.push(`${s.title}: ${e.message}`);
+      return prev.get(s.id) || null;
+    }
+  });
+  store.pruneSeries(wanted.map((s) => s.id));
+  const scanned = rows.filter(Boolean);
+  const changes = rules.diffScans(prev, scanned);
+  Object.assign(summary, { scanned: scanned.length, totals: rules.totals(scanned), upgraded: changes.upgraded, problems: changes.problems });
+  log(`Scanned ${scanned.length} series: ${JSON.stringify(summary.totals.files)}`);
+  return changes;
+}
+
+/** Sends the upgrade / new-problem notifications for a scan. */
+async function notifyChanges(settings, changes, summary) {
+  const events = [];
+  if (settings.notifyUpgrades && changes.upgraded.length) events.push({ kind: 'upgraded', series: changes.upgraded });
+  if (settings.notifyProblems && changes.problems.length) events.push({ kind: 'problems', series: changes.problems });
+  for (const evt of events) {
+    const failures = await notifyAll(settings.notifiers || [], evt);
+    summary.warnings.push(...failures.map((f) => `Notification failed: ${f}`));
+  }
+  if (events.length && settings.notifiers?.length) summary.notified = events.length;
+}
+
+/** Scan + notify (+ the paced automatic search, for the scheduled run). */
+export function scanJob(trigger, { autoSearch = false } = {}) {
+  return job(trigger, async (summary, client, settings) => {
+    const changes = await scanLibrary(client, settings, summary);
+    await notifyChanges(settings, changes, summary);
+    if (autoSearch && settings.autoSearch) summary.searched = await searchDue(client, settings, summary);
+  });
+}
+
+// ---------- searching ----------
+
+/** Asks Sonarr to search for better releases of the files in a series that need them. */
+export async function searchSeries(client, row) {
+  const plan = rules.searchPlan(row.files, await client.episodes(row.id));
+  for (const seasonNumber of plan.seasons) await client.command({ name: 'SeasonSearch', seriesId: row.id, seasonNumber });
+  if (plan.episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds: plan.episodeIds });
+  store.markSearched(row.id);
+  return { id: row.id, title: row.title, seasons: plan.seasons.length, episodes: plan.episodeIds.length };
+}
+
+/**
+ * The scheduled search: the monitored series that still need work and haven't been searched in
+ * `searchAgainDays`, least recently searched first, at most `searchPerRun` of them — so a large
+ * library is worked through over several nights without hammering the indexers.
+ */
+export function dueForSearch(rows, settings, now = Date.now()) {
+  const before = now - settings.searchAgainDays * 86_400_000;
+  return rows
+    .filter((r) => r.monitored && rules.needsSearch(r) && (!r.searchedAt || Date.parse(r.searchedAt) < before))
+    .sort((a, b) => String(a.searchedAt || '').localeCompare(String(b.searchedAt || '')))
+    .slice(0, settings.searchPerRun);
+}
+
+async function searchDue(client, settings, summary) {
+  const out = [];
+  for (const row of dueForSearch(store.listSeries(), settings)) {
+    try {
+      out.push(await searchSeries(client, row));
+    } catch (e) {
+      summary.warnings.push(`Search for ${row.title}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
+/** Searches the given series now (the Search buttons), whatever the schedule says. */
+export function searchJob(ids) {
+  return job('search', async (summary) => {
+    const client = sonarrClient(store.getSettings());
+    const rows = ids.map(store.getSeries).filter((r) => r && rules.needsSearch(r));
+    if (!rows.length) throw new Error('Nothing to search for — every file already has dual audio');
+    summary.searched = [];
+    for (const row of rows) {
+      try {
+        summary.searched.push(await searchSeries(client, row));
+      } catch (e) {
+        summary.warnings.push(`Search for ${row.title}: ${e.message}`);
+      }
+    }
+    return summary.searched;
+  });
+}
+
+// ---------- replacing ----------
+
+/** Re-scans one series (after a replace) and stores it. */
+async function rescan(client, settings, id) {
+  const row = rules.summariseSeries(await client.seriesById(id), await client.episodeFiles(id), ruleOptions(settings));
+  store.saveSeries(row);
+  return row;
+}
+
+/**
+ * Replaces files that break the rules (no Japanese audio / no subtitles): blocklists the release
+ * that produced each one (when Sonarr's history says which), deletes the file, and searches for
+ * the episodes again. Files that are fine by now are left alone.
+ */
+export function replaceJob(seriesId, fileIds) {
+  return job('replace', async (summary, client, settings) => {
+    const [files, episodes, history] = await Promise.all([
+      client.episodeFiles(seriesId),
+      client.episodes(seriesId),
+      client.seriesHistory(seriesId).catch(() => []),
+    ]);
+    const opts = ruleOptions(settings);
+    const targets = files.filter((f) => fileIds.includes(f.id) && rules.REPLACEABLE.includes(rules.classifyFile(f, opts).status));
+    if (!targets.length) throw new Error('None of those files break the rules any more — scan again');
+    let blocklisted = 0;
+    for (const f of targets) {
+      const grab = rules.grabFor(history, f);
+      if (grab) {
+        try {
+          await client.markFailed(grab.id);
+          blocklisted++;
+        } catch (e) {
+          summary.warnings.push(`Could not blocklist ${grab.sourceTitle}: ${e.message}`);
+        }
+      }
+      await client.deleteEpisodeFile(f.id);
+    }
+    const replacedIds = new Set(targets.map((f) => f.id));
+    const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
+    if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
+    const row = await rescan(client, settings, seriesId);
+    summary.replaced = { title: row.title, files: targets.length, blocklisted, episodes: episodeIds.length };
+    log(`Replaced ${targets.length} file(s) of ${row.title} (${blocklisted} blocklisted)`);
+    return row;
+  });
+}
+
+// ---------- custom formats ----------
+
+/** Creates/updates the custom formats and applies their scores to the chosen profiles. */
+export function setupJob() {
+  return job('setup', async (summary, client, settings) => {
+    if (!settings.profileIds.length) throw new Error('Pick at least one quality profile');
+    const existing = await client.customFormats();
+    const ids = {};
+    for (const [key, body] of Object.entries(rules.customFormats())) {
+      const cur = existing.find((c) => c.name === body.name);
+      ids[key] = (await client.saveCustomFormat(cur ? { ...body, id: cur.id } : body)).id;
+    }
+    summary.profiles = [];
+    for (const id of settings.profileIds) {
+      const p = await client.qualityProfile(id);
+      await client.saveQualityProfile(rules.profileWithScores(p, ids, settings.dualScore));
+      summary.profiles.push(p.name);
+    }
+    log(`Custom formats set up; scores applied to ${summary.profiles.join(', ')}`);
+    return ids;
+  });
+}
+
+/** The custom formats' ids in Sonarr (null if missing). */
+export async function formatIds(client) {
+  const all = await client.customFormats();
+  const find = (name) => all.find((c) => c.name === name)?.id ?? null;
+  return { dual: find(rules.CF_NAMES.dual), dub: find(rules.CF_NAMES.dub) };
+}
+
+/** What the setup page shows: the formats, and every profile with how many checked series use it. */
+export async function setupState(client, settings) {
+  const [ids, profiles, series] = await Promise.all([formatIds(client), client.qualityProfiles(), client.series()]);
+  const used = new Map();
+  for (const s of series) if (rules.inScope(s, settings.scope)) used.set(s.qualityProfileId, (used.get(s.qualityProfileId) || 0) + 1);
+  return {
+    formats: ids,
+    profiles: profiles.map((p) => ({ ...rules.profileState(p, ids), series: used.get(p.id) || 0 })),
+  };
+}
