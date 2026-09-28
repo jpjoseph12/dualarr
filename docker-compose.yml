@@ -1,0 +1,15 @@
+# Dualarr — see README.md for every option.
+# Start:  docker compose up -d      Update:  docker compose pull && docker compose up -d
+services:
+  dualarr:
+    image: ghcr.io/jpjoseph12/dualarr:latest
+    container_name: dualarr
+    restart: unless-stopped
+    ports:
+      - "6162:6162"            # host:container — change the left side if 6162 is taken
+    environment:
+      - TZ=Europe/London       # your time zone; scheduled scans run in it
+      - PUID=1000              # user that owns ./config  (run `id -u`)
+      - PGID=1000              # group that owns ./config (run `id -g`)
+    volumes:
+      - ./config:/config       # database (settings, login, last scan) — keep it!

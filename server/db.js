@@ -84,7 +84,7 @@ export function saveSettings(patch) {
 
 // ---------- series scans ----------
 
-const rowToSeries = (r) => r && { ...JSON.parse(r.data), scannedAt: r.scanned_at, searchedAt: r.searched_at };
+const rowToSeries = (r) => r ? { ...JSON.parse(r.data), scannedAt: r.scanned_at, searchedAt: r.searched_at } : null;
 
 export const listSeries = () =>
   db.prepare('SELECT * FROM series ORDER BY title COLLATE NOCASE').all().map(rowToSeries);

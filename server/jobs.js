@@ -87,18 +87,32 @@ async function notifyChanges(settings, changes, summary) {
   const events = [];
   if (settings.notifyUpgrades && changes.upgraded.length) events.push({ kind: 'upgraded', series: changes.upgraded });
   if (settings.notifyProblems && changes.problems.length) events.push({ kind: 'problems', series: changes.problems });
+  const enabled = (settings.notifiers || []).filter((n) => n.enabled !== false).length;
+  let sent = 0;
   for (const evt of events) {
     const failures = await notifyAll(settings.notifiers || [], evt);
     summary.warnings.push(...failures.map((f) => `Notification failed: ${f}`));
+    // Sent means at least one notifier delivered it.
+    if (failures.length < enabled) sent++;
   }
-  if (events.length && settings.notifiers?.length) summary.notified = events.length;
+  if (sent) summary.notified = sent;
 }
 
-/** Scan + notify (+ the paced automatic search, for the scheduled run). */
-export function scanJob(trigger, { autoSearch = false } = {}) {
+/**
+ * Scan + notify (+ the paced automatic search, for the scheduled run). `notify: false` is for the
+ * rescan after the rules change: new verdicts then aren't news about the files.
+ */
+export function scanJob(trigger, { autoSearch = false, notify = true } = {}) {
   return job(trigger, async (summary, client, settings) => {
-    const changes = await scanLibrary(client, settings, summary);
-    await notifyChanges(settings, changes, summary);
+    let changes;
+    try {
+      changes = await scanLibrary(client, settings, summary);
+    } catch (e) {
+      // Nobody is watching a scheduled scan, so say when it couldn't reach Sonarr.
+      if (trigger === 'schedule' && settings.notifyProblems) await notifyAll(settings.notifiers || [], { kind: 'error', error: e.message });
+      throw e;
+    }
+    if (notify) await notifyChanges(settings, changes, summary);
     if (autoSearch && settings.autoSearch) summary.searched = await searchDue(client, settings, summary);
   });
 }
@@ -141,8 +155,7 @@ async function searchDue(client, settings, summary) {
 
 /** Searches the given series now (the Search buttons), whatever the schedule says. */
 export function searchJob(ids) {
-  return job('search', async (summary) => {
-    const client = sonarrClient(store.getSettings());
+  return job('search', async (summary, client) => {
     const rows = ids.map(store.getSeries).filter((r) => r && rules.needsSearch(r));
     if (!rows.length) throw new Error('Nothing to search for — every file already has dual audio');
     summary.searched = [];
@@ -218,9 +231,14 @@ export function setupJob() {
     }
     summary.profiles = [];
     for (const id of settings.profileIds) {
-      const p = await client.qualityProfile(id);
-      await client.saveQualityProfile(rules.profileWithScores(p, ids, settings.dualScore));
-      summary.profiles.push(p.name);
+      // One missing profile (deleted in Sonarr since) shouldn't stop the others.
+      try {
+        const p = await client.qualityProfile(id);
+        await client.saveQualityProfile(rules.profileWithScores(p, ids, settings.dualScore));
+        summary.profiles.push(p.name);
+      } catch (e) {
+        summary.warnings.push(`Quality profile ${id}: ${e.message}`);
+      }
     }
     log(`Custom formats set up; scores applied to ${summary.profiles.join(', ')}`);
     return ids;

@@ -1,0 +1,12 @@
+node_modules
+.config
+.git
+.github
+test
+tools
+templates
+docs
+ca_profile.xml
+*.md
+Dockerfile
+docker-compose.yml

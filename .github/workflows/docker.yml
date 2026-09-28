@@ -1,0 +1,147 @@
+name: Test, build & publish
+
+# Every push and pull request runs the full test suite (with coverage thresholds) and a smoke
+# test of the real Docker image. Only pushes to main / version tags publish the image.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests & coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Check the web UI script parses
+        run: npm run test:ui
+
+      # Unit + API tests against local stand-ins for Sonarr and webhooks — no network or API
+      # keys needed. Fails if coverage drops
+      # below the thresholds in package.json (lines 90%, branches 75%, functions 85%).
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Coverage summary
+        if: always()
+        run: node test/coverage-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: ignore
+
+  smoke:
+    name: Container smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: dualarr:ci
+          cache-from: type=gha
+
+      - name: Start it like a user would
+        run: |
+          mkdir -p "$RUNNER_TEMP/config"
+          docker run -d --name dualarr -p 6162:6162 \
+            -e TZ=Europe/London -e PUID=1001 -e PGID=1002 \
+            -v "$RUNNER_TEMP/config:/config" dualarr:ci
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:6162/api/health && exit 0
+            sleep 2
+          done
+          echo "Dualarr never answered"; exit 1
+
+      - name: Check the running container
+        run: |
+          set -eux
+          # API and web UI (with version-stamped assets) respond
+          curl -fsS http://localhost:6162/api/health | grep -q '"ok":true'
+          curl -fsS http://localhost:6162/ | grep -q 'app.js?v='
+          curl -fsS -o /dev/null http://localhost:6162/icon.png
+          # the API is locked until an account exists; create one like the first-run screen does
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:6162/api/library)" = 401
+          curl -fsS -c jar -X POST http://localhost:6162/api/auth/setup -H 'Content-Type: application/json' \
+            -d '{"username":"smoke","password":"smoke-test-password"}' | grep -q '"ok":true'
+          # the session works, and changes need the UI's header
+          curl -fsS -b jar http://localhost:6162/api/library | grep -q '"series":\[\]'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -b jar -X PUT http://localhost:6162/api/settings -H 'Content-Type: application/json' -d '{}')" = 403
+          curl -fsS -b jar -X PUT http://localhost:6162/api/settings -H 'Content-Type: application/json' -H 'X-Dualarr: 1' \
+            -d '{"searchPerRun":5}' | grep -q '"searchPerRun":5'
+          # scripts can use the generated API key; a scan without Sonarr says what's missing
+          KEY=$(curl -fsS -b jar http://localhost:6162/api/settings | sed -n 's/.*"apiKey":"\([0-9a-f]*\)".*/\1/p')
+          curl -fsS -H "X-Api-Key: $KEY" http://localhost:6162/api/status | grep -q '"schedule":"0 4 \* \* \*"'
+          curl -s -X POST -H "X-Api-Key: $KEY" http://localhost:6162/api/scan | grep -q 'Connect Sonarr'
+          # runs as PUID:PGID and /config belongs to them
+          docker exec dualarr sh -c 'grep "^Uid:" /proc/1/status' | grep -q $'\t1001\t'
+          test "$(stat -c '%u:%g' "$RUNNER_TEMP/config/dualarr.db")" = "1001:1002"
+          # honours TZ for the schedule
+          docker logs dualarr 2>&1 | grep -q '(TZ Europe/London)'
+
+      - name: Container logs
+        if: always()
+        run: docker logs dualarr || true
+
+  image:
+    name: Publish image
+    needs: [test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
