@@ -32,8 +32,10 @@ const clip = (lines) => lines.slice(0, MAX_LINES).join('\n') + (lines.length > M
 
 /**
  * Builds the message for an event:
- *  { kind: 'upgraded', series: [{ title, files }] }                 subbed files replaced by dual audio
- *  { kind: 'problems', series: [{ title, noJapanese, noSubs }] }    new files breaking the rules
+ *  { kind: 'upgraded', series: [{ title, files, mode, lang? }] }    subbed files replaced by dual audio (or
+ *                                                                   dual audio by the original language only)
+ *  { kind: 'problems', series: [{ title, noJapanese, noSubs, dualAudio?, lang? }] }  new files breaking the rules
+ *  { kind: 'replaced', series: [{ title, files }] }                 files replaced automatically
  *  { kind: 'error', error }
  *  { kind: 'test' }
  */
@@ -51,6 +53,14 @@ export function message(evt) {
       title: `${what}: ${plural(files, 'file')} upgraded`,
       text: clip(evt.series.map((s) => `${s.title} (${plural(s.files, 'file')}${mixed && s.mode === 'original' ? `, ${langName(s.lang || 'ja')} only` : ''})`)),
       color: COLOR.upgraded,
+    };
+  }
+  if (evt.kind === 'replaced') {
+    const files = evt.series.reduce((n, s) => n + s.files, 0);
+    return {
+      title: `Dualarr: replaced ${plural(files, 'file')} that broke the rules`,
+      text: clip(evt.series.map((s) => `${s.title} (${plural(s.files, 'file')} deleted, searching again)`)),
+      color: COLOR.problems,
     };
   }
   const why = (s) => {

@@ -415,6 +415,14 @@ describe('rules changes', () => {
 describe('checking files', () => {
   const MEDIA = path.join(CONFIG_DIR, 'media');
 
+  test('automatic replacement: off, wrong language, or everything; capped', async () => {
+    assert.equal(store.getSettings().autoReplace, 'off', 'off by default: it deletes files');
+    assert.equal((await me.ui('PUT', '/api/settings', { autoReplace: 'yes' })).status, 400);
+    const s = await ok('PUT', '/api/settings', { autoReplace: 'language', replacePerRun: 500 });
+    assert.deepEqual([s.autoReplace, s.replacePerRun, s.rescanning], ['language', 100, false]);
+    await ok('PUT', '/api/settings', { autoReplace: 'off', replacePerRun: 10 });
+  });
+
   test('settings are validated', async () => {
     for (const bad of [
       { verifyModel: 'large' },

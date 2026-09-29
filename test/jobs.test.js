@@ -238,6 +238,46 @@ describe('replacing', () => {
   });
 });
 
+describe('automatic replacement', () => {
+  test('off by default: a scheduled scan deletes nothing', async () => {
+    await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(sonarr.state.deleted, []);
+  });
+
+  test('wrong language: blocklisted, deleted and searched again after a scheduled scan', async () => {
+    store.saveSettings({ autoReplace: 'language', autoSearch: false });
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(r.summary.autoReplaced, [{ id: 2, title: 'Dandadan', files: 1, episodes: 1 }]);
+    assert.deepEqual([sonarr.state.failed, sonarr.state.deleted], [[900], [203]], 'the English dub; no-subs files are left alone');
+    assert.deepEqual(sonarr.state.commands, [{ name: 'EpisodeSearch', episodeIds: [1007] }]);
+    assert.equal(store.getSeries(2).counts.noJapanese, 0);
+    assert.ok(events().includes('replaced'));
+    // Manual scans never replace.
+    sonarr.state.deleted.length = 0;
+    await jobs.scanJob('scan');
+    assert.deepEqual(sonarr.state.deleted, []);
+  });
+
+  test('a file without a grab to blocklist is left for a manual Replace; unmonitored series are skipped', async () => {
+    store.saveSettings({ autoReplace: 'all', autoSearch: false });
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    // Mushishi S01E01 has no subtitles but no grab in the history; Old Anime is unmonitored.
+    assert.deepEqual(sonarr.state.deleted, [203]);
+    assert.equal(r.summary.autoReplaceSkipped, 1);
+    assert.equal(r.status, 'ok', 'not a warning: it is reported, not a failure');
+  });
+
+  test('capped per scan, and dual audio counts as wrong in an original-only profile', async () => {
+    store.saveSettings({ autoReplace: 'language', replacePerRun: 1, autoSearch: false, profileRules: { 1: { mode: 'original', lang: 'ja' } } });
+    // Give the dual audio files grabs, so they can be blocklisted.
+    sonarr.state.history[1] = [101, 102].map((id) => ({ id: 800 + id, eventType: 'grabbed', date: '2026-09-01T00:00:00Z', sourceTitle: `Frieren.${id}.Dual.Audio` }));
+    for (const f of sonarr.state.files) if (f.seriesId === 1 && f.seasonNumber === 1) f.sceneName = `Frieren.${f.id}.Dual.Audio`;
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.equal(r.summary.autoReplaced.reduce((n, x) => n + x.files, 0), 1, 'one file this scan');
+    assert.equal(sonarr.state.deleted.length, 1);
+  });
+});
+
 describe('per-profile rules', () => {
   test('an original-only profile: subbed is done, dual audio is replaced like a dub', async () => {
     store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'ja' } } });

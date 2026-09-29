@@ -136,6 +136,11 @@ function sanitizeSettings(b, saved) {
   if (b.profileIds !== undefined) patch.profileIds = intList(b.profileIds).filter((n) => n > 0);
   if (b.profileRules !== undefined) patch.profileRules = profileRules(b.profileRules);
   if (b.searchPerRun !== undefined) patch.searchPerRun = clampInt(b.searchPerRun, 1, 100, saved.searchPerRun);
+  if (b.autoReplace !== undefined) {
+    if (!rules.AUTO_REPLACE.includes(b.autoReplace)) throw bad(`autoReplace must be one of ${rules.AUTO_REPLACE.join(', ')}`);
+    patch.autoReplace = b.autoReplace;
+  }
+  if (b.replacePerRun !== undefined) patch.replacePerRun = clampInt(b.replacePerRun, 1, 100, saved.replacePerRun);
   if (b.searchAgainDays !== undefined) patch.searchAgainDays = clampInt(b.searchAgainDays, 1, 365, saved.searchAgainDays);
   if (b.schedule !== undefined) {
     const expr = String(b.schedule).trim();

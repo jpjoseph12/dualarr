@@ -71,6 +71,19 @@ export const MODES = {
   original: { good: 'subbed', needsSearch: ['dual', 'noSubs', 'noJapanese'], replaceable: ['dual', 'noSubs', 'noJapanese'] },
 };
 export const NEEDS_SEARCH = MODES.dual.needsSearch;
+
+/** The automatic replacement settings: off, wrong audio language, or that and no subtitles. */
+export const AUTO_REPLACE = ['off', 'language', 'all'];
+
+/**
+ * The verdicts automatic replacement takes in a series of the given mode. Wrong language means no
+ * original-language audio, and dual audio in an original-only series.
+ */
+export function autoReplaceable(mode, setting) {
+  if (!AUTO_REPLACE.includes(setting) || setting === 'off') return [];
+  const language = mode === 'original' ? ['noJapanese', 'dual'] : ['noJapanese'];
+  return setting === 'all' ? [...language, 'noSubs'] : language;
+}
 export const REPLACEABLE = MODES.dual.replaceable;
 
 /**

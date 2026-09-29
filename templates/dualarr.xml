@@ -26,6 +26,7 @@
   <Changes>
 ### 0.3.0 (2026-09-29)
 - Per quality profile: dual audio (original + English), or the original language only. In an original-only profile, dual audio is never grabbed and existing dual audio files can be replaced.
+- Replace wrong files automatically (off by default): after a scheduled scan, files in the wrong audio language (optionally also without subtitles) are blocklisted, deleted and searched again, until the right one arrives.
 - Any original language: Japanese by default, or Chinese, Korean and more, or each series' own from Sonarr (for donghua next to anime).
 - Dualarr-NVIDIA: Check files really runs on the GPU now. The CUDA backend needed a library (NCCL) that was missing from the image, so whisper quietly fell back to the CPU.
 

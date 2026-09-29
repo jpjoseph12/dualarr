@@ -69,6 +69,10 @@ export const SETTING_DEFAULTS = {
   autoSearch: true,
   searchPerRun: 10,
   searchAgainDays: 7,
+  // After a scheduled scan, replace files that break the rules without asking: 'off',
+  // 'language' (wrong audio language) or 'all' (also no subtitles); at most replacePerRun a scan.
+  autoReplace: 'off',
+  replacePerRun: 10,
   notifiers: [],
   notifyUpgrades: true,
   notifyProblems: true,

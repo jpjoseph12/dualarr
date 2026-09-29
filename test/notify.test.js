@@ -44,6 +44,11 @@ describe('messages', () => {
     assert.equal(message(bad).text, 'Link Click: 1 without Chinese audio, 2 with dual audio (Chinese only)');
   });
 
+  test('files replaced automatically', () => {
+    const m = message({ kind: 'replaced', series: [{ title: 'Dandadan', files: 1 }, { title: 'Frieren', files: 2 }] });
+    assert.deepEqual([m.title, m.text], ['Dualarr: replaced 3 files that broke the rules', 'Dandadan (1 file deleted, searching again)\nFrieren (2 files deleted, searching again)']);
+  });
+
   test('long lists are clipped', () => {
     const series = Array.from({ length: 25 }, (_, i) => ({ title: `Show ${i}`, files: 1 }));
     const m = message({ kind: 'upgraded', series });

@@ -150,6 +150,8 @@ export function scanJob(trigger, { autoSearch = false, notify = true } = {}) {
       throw e;
     }
     if (notify) await notifyChanges(settings, changes, summary);
+    // Wrong files go first, so the search after it doesn't look for what is being replaced anyway.
+    if (autoSearch && settings.autoReplace !== 'off') await replaceDue(client, settings, summary, { notify });
     if (autoSearch && settings.autoSearch) summary.searched = await searchDue(client, settings, summary);
   });
 }
@@ -330,38 +332,98 @@ export function searchJob(ids) {
  */
 export function replaceJob(seriesId, fileIds) {
   return job('replace', async (summary, client, settings) => {
-    const [series, files, episodes, history] = await Promise.all([
-      client.seriesById(seriesId),
-      client.episodeFiles(seriesId),
-      client.episodes(seriesId),
-      client.seriesHistory(seriesId).catch(() => []),
-    ]);
-    const opts = ruleOptions(settings, series);
-    const replaceable = rules.MODES[opts.mode].replaceable;
-    const checks = store.getChecks(seriesId);
-    const targets = files.filter((f) => fileIds.includes(f.id) && replaceable.includes(rules.classifyFile(f, opts, checks.get(f.id)).status));
+    const { series, targets } = await filesToReplace(client, settings, seriesId, fileIds);
     if (!targets.length) throw new Error('None of those files break the rules any more — scan again');
-    let blocklisted = 0;
-    for (const f of targets) {
-      const grab = rules.grabFor(history, f);
-      if (grab) {
-        try {
-          await client.markFailed(grab.id);
-          blocklisted++;
-        } catch (e) {
-          summary.warnings.push(`Could not blocklist ${grab.sourceTitle}: ${e.message}`);
-        }
-      }
-      await client.deleteEpisodeFile(f.id);
-    }
-    const replacedIds = new Set(targets.map((f) => f.id));
-    const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
-    if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
-    const row = saveVerdicts(series, await client.episodeFiles(seriesId), settings);
-    summary.replaced = { title: row.title, files: targets.length, blocklisted, episodes: episodeIds.length };
-    log(`Replaced ${targets.length} file(s) of ${row.title} (${blocklisted} blocklisted)`);
-    return row;
+    const r = await replaceFiles(client, settings, series, targets, summary);
+    summary.replaced = { title: r.row.title, files: r.files, blocklisted: r.blocklisted, episodes: r.episodes };
+    log(`Replaced ${r.files} file(s) of ${r.row.title} (${r.blocklisted} blocklisted)`);
+    return r.row;
   });
+}
+
+/**
+ * A series' files among `fileIds` that break its rules right now (read fresh from Sonarr, judged
+ * with their checks, as the library shows them). `statuses`: the verdicts to take.
+ */
+async function filesToReplace(client, settings, seriesId, fileIds, statuses = null) {
+  const [series, files] = await Promise.all([client.seriesById(seriesId), client.episodeFiles(seriesId)]);
+  const opts = ruleOptions(settings, series);
+  const wanted = statuses || rules.MODES[opts.mode].replaceable;
+  const checks = store.getChecks(seriesId);
+  const targets = files.filter((f) => fileIds.includes(f.id) && wanted.includes(rules.classifyFile(f, opts, checks.get(f.id)).status));
+  return { series, targets };
+}
+
+/**
+ * Blocklists the grab behind each file (so Sonarr won't download that release again), deletes the
+ * file and searches its episodes again, then rescans the series. With `requireGrab`, a file whose
+ * grab can't be found or blocklisted is left alone: deleting it could bring the same release back.
+ */
+async function replaceFiles(client, settings, series, targets, summary, { requireGrab = false } = {}) {
+  const [episodes, history] = await Promise.all([client.episodes(series.id), client.seriesHistory(series.id).catch(() => [])]);
+  let blocklisted = 0;
+  const done = [];
+  const skipped = [];
+  for (const f of targets) {
+    const grab = rules.grabFor(history, f);
+    let listed = false;
+    if (grab) {
+      try {
+        await client.markFailed(grab.id);
+        blocklisted++;
+        listed = true;
+      } catch (e) {
+        summary.warnings.push(`Could not blocklist ${grab.sourceTitle}: ${e.message}`);
+      }
+    }
+    if (requireGrab && !listed) {
+      skipped.push(f);
+      continue;
+    }
+    await client.deleteEpisodeFile(f.id);
+    done.push(f);
+  }
+  const replacedIds = new Set(done.map((f) => f.id));
+  const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
+  if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
+  const row = done.length ? saveVerdicts(series, await client.episodeFiles(series.id), settings) : null;
+  return { row, files: done.length, blocklisted, episodes: episodeIds.length, skipped: skipped.length };
+}
+
+/**
+ * The scheduled replacement (settings.autoReplace): files in monitored series that break the
+ * chosen rules are replaced, at most `replacePerRun` a scan. The new downloads are checked at the
+ * next scan, and replaced again if they are wrong too — each wrong release is blocklisted, so it
+ * never comes back. Files Sonarr's history can't tie to a release are left for a manual Replace.
+ */
+async function replaceDue(client, settings, summary, { notify = true } = {}) {
+  const out = [];
+  let budget = settings.replacePerRun;
+  let skipped = 0;
+  for (const row of store.listSeries()) {
+    if (budget <= 0) break;
+    const statuses = rules.autoReplaceable(row.mode, settings.autoReplace);
+    const ids = row.monitored ? row.files.filter((f) => statuses.includes(f.status)).map((f) => f.id) : [];
+    if (!ids.length) continue;
+    try {
+      const { series, targets } = await filesToReplace(client, settings, row.id, ids, statuses);
+      if (!targets.length) continue;
+      const r = await replaceFiles(client, settings, series, targets.slice(0, budget), summary, { requireGrab: true });
+      budget -= r.files;
+      skipped += r.skipped;
+      if (r.files) out.push({ id: row.id, title: row.title, files: r.files, episodes: r.episodes });
+    } catch (e) {
+      summary.warnings.push(`Replacing files of ${row.title}: ${e.message}`);
+    }
+  }
+  summary.autoReplaced = out;
+  if (skipped) summary.autoReplaceSkipped = skipped;
+  if (out.length) log(`Replaced ${out.reduce((n, r) => n + r.files, 0)} wrong file(s) automatically`);
+  if (out.length && notify && settings.notifyProblems) {
+    const failures = await notifyAll(settings.notifiers || [], { kind: 'replaced', series: out });
+    summary.warnings.push(...failures.map((f) => `Notification failed: ${f}`));
+    if (failures.length < (settings.notifiers || []).filter((n) => n.enabled !== false).length) summary.notified = (summary.notified || 0) + 1;
+  }
 }
 
 // ---------- custom formats ----------

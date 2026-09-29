@@ -701,6 +701,18 @@ async function viewSettings() {
               <div class="field"><label for="again">Search again after (days)</label><input class="input" id="again" name="searchAgainDays" type="number" min="1" max="365" value="${esc(s.searchAgainDays)}" /></div>
             </div>
             <span class="hint">Least recently searched first, so a big library is worked through over a few nights without hammering your indexers.</span>
+            <div class="row">
+              <div class="field">
+                <label for="auto-replace">Replace wrong files automatically</label>
+                <select class="select" id="auto-replace" name="autoReplace">
+                  <option value="off"${s.autoReplace === 'off' ? ' selected' : ''}>Off — replace by hand</option>
+                  <option value="language"${s.autoReplace === 'language' ? ' selected' : ''}>Wrong audio language</option>
+                  <option value="all"${s.autoReplace === 'all' ? ' selected' : ''}>Wrong audio language, or no subtitles</option>
+                </select>
+              </div>
+              <div class="field" style="max-width:150px"><label for="replace-per-run">Files per scan</label><input class="input" id="replace-per-run" name="replacePerRun" type="number" min="1" max="100" value="${esc(s.replacePerRun)}" /></div>
+            </div>
+            <span class="hint">After a scheduled scan, files in the wrong language (no original-language audio, or dual audio in an “original language only” profile) are replaced like the Replace button does: the release is blocklisted so it can’t come back, the file is deleted and Sonarr searches again. The new download is checked at the next scan and replaced again if it’s wrong too. Only files whose release Sonarr’s history knows are replaced, and never in unmonitored series.</span>
           </div>
         </div>
 
@@ -921,6 +933,8 @@ async function viewSettings() {
       schedule: fd.get('schedule'),
       autoSearch: fd.get('autoSearch') === 'on',
       searchPerRun: Number(fd.get('searchPerRun')),
+      autoReplace: fd.get('autoReplace'),
+      replacePerRun: Number(fd.get('replacePerRun')),
       searchAgainDays: Number(fd.get('searchAgainDays')),
       notifyUpgrades: fd.get('notifyUpgrades') === 'on',
       notifyProblems: fd.get('notifyProblems') === 'on',
@@ -1108,9 +1122,9 @@ function runRow(r) {
     lines.push(`<span>Checked ${plural(s.scanned, 'series', 'series')}</span>`);
     if (s.totals) lines.push(`<div class="vbs">${Object.keys(VERDICTS).filter((k) => s.totals.files[k]).map((k) => verdictBadge(k, s.totals.files[k])).join('')}</div>`);
   }
-  if (s.upgraded?.length) lines.push(`<span style="color:var(--ok)">Upgraded to dual audio: ${esc(titles(s.upgraded, (u) => `${u.title} (${u.files})`))}</span>`);
+  if (s.upgraded?.length) lines.push(`<span style="color:var(--ok)">Upgraded: ${esc(titles(s.upgraded, (u) => `${u.title} (${u.files}${u.mode === 'original' ? `, ${langName(u.lang || 'ja')} only` : ' dual audio'})`))}</span>`);
   if (s.problems?.length) {
-    lines.push(`<span style="color:var(--warn)">New problems: ${esc(titles(s.problems, (p) => `${p.title} (${[p.noJapanese && `${p.noJapanese} no Japanese`, p.noSubs && `${p.noSubs} no subs`].filter(Boolean).join(', ')})`))}</span>`);
+    lines.push(`<span style="color:var(--warn)">New problems: ${esc(titles(s.problems, (p) => `${p.title} (${[p.noJapanese && `${p.noJapanese} no ${langName(p.lang || 'ja')}`, p.noSubs && `${p.noSubs} no subs`, p.dualAudio && `${p.dualAudio} dual audio`].filter(Boolean).join(', ')})`))}</span>`);
   }
   if (s.verified) {
     const v = s.verified;
@@ -1121,6 +1135,8 @@ function runRow(r) {
   if (s.tested) lines.push(`<span>Tested on ${esc(s.tested.title)} — ${esc(s.tested.file.split('/').pop())}: ${s.tested.seconds}s on ${esc(s.tested.device)}</span>`);
   if (s.searched?.length) lines.push(`<span>Searched: ${esc(titles(s.searched, (x) => x.title))}</span>`);
   else if (s.searched && r.trigger === 'schedule') lines.push('<span class="faint">Nothing due for a search</span>');
+  if (s.autoReplaced?.length) lines.push(`<span>Replaced automatically: ${esc(titles(s.autoReplaced, (x) => `${x.title} (${x.files})`))}</span>`);
+  if (s.autoReplaceSkipped) lines.push(`<span class="faint">${plural(s.autoReplaceSkipped, 'file')} left for a manual Replace: Sonarr’s history doesn’t say which release ${s.autoReplaceSkipped === 1 ? 'it' : 'they'} came from</span>`);
   if (s.replaced) lines.push(`<span>${esc(s.replaced.title)}: deleted ${plural(s.replaced.files, 'file')}, blocklisted ${s.replaced.blocklisted}, searching ${plural(s.replaced.episodes, 'episode')}</span>`);
   if (s.profiles?.length) lines.push(`<span>Scores applied to ${esc(s.profiles.join(', '))}</span>`);
   for (const w of s.warnings || []) lines.push(`<span style="color:var(--warn)">${esc(w)}</span>`);

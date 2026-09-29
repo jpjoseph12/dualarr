@@ -5,7 +5,7 @@ A standalone companion to Sonarr for anime. It keeps every file in Japanese audi
 ## Done
 
 - `config.js`: CONFIG_DIR (default `/config`), PORT (default **6162**; Courarr uses 6161), TZ, VERSION, `log`.
-- `db.js`: tables `settings`, `series` (latest scan per Sonarr series as JSON, plus `searched_at`), `sessions` and `runs` (activity log). Includes `SETTING_DEFAULTS`: Sonarr URL/key, `scope` ('anime' | 'japanese'), `requireSubtitles`, `subtitleLanguage` ('any' | 'en' | …), `dualScore` (2000), `profileIds`, `profileRules` (per profile `{ mode: 'dual' | 'original', lang: 'ja' | … | 'auto' }`; only non-defaults stored), `schedule` ('0 4 * * *'), `autoSearch`, `searchPerRun` (10), `searchAgainDays` (7), notifiers, `notifyUpgrades`, `notifyProblems`, auth fields and `apiKey`.
+- `db.js`: tables `settings`, `series` (latest scan per Sonarr series as JSON, plus `searched_at`), `sessions` and `runs` (activity log). Includes `SETTING_DEFAULTS`: Sonarr URL/key, `scope` ('anime' | 'japanese'), `requireSubtitles`, `subtitleLanguage` ('any' | 'en' | …), `dualScore` (2000), `profileIds`, `profileRules` (per profile `{ mode: 'dual' | 'original', lang: 'ja' | … | 'auto' }`; only non-defaults stored), `schedule` ('0 4 * * *'), `autoSearch`, `searchPerRun` (10), `searchAgainDays` (7), `autoReplace` ('off' | 'language' | 'all') and `replacePerRun` (10), notifiers, `notifyUpgrades`, `notifyProblems`, auth fields and `apiKey`.
 - `auth.js`: copied from Courarr (scrypt login, cookie sessions `dualarr_session`, API key, login rate limit). The feed key was removed, and the reset env var is `DUALARR_RESET_AUTH`.
 - `sonarr.js`: the v4 API client (series, seriesById, episodeFiles, episodes, seriesHistory, markFailed, deleteEpisodeFile, command, customFormats/saveCustomFormat, qualityProfiles/qualityProfile/saveQualityProfile). Empty response bodies return null.
 - `rules.js`: **pure logic, no I/O**:
@@ -21,6 +21,7 @@ A standalone companion to Sonarr for anime. It keeps every file in Japanese audi
   - `scanJob(trigger, { autoSearch })`: scan, notify, then (on the schedule) `dueForSearch()`, which searches least-recently-searched first and is capped by `searchPerRun` and `searchAgainDays`.
   - `searchJob(ids)`: manual search.
   - `replaceJob(seriesId, fileIds)`: only for the series' mode's replaceable files (plus `dual` in original mode), judged with the stored checks. It marks the grab failed (blocklisting it), deletes the file, sends an EpisodeSearch and rescans the series.
+  - `replaceDue()` (scheduled scans, when `autoReplace` isn't off): `rules.autoReplaceable(mode, setting)` files in monitored series, capped by `replacePerRun`, through `replaceFiles(..., { requireGrab: true })`, so files with no grab to blocklist are skipped (counted in `autoReplaceSkipped`) rather than deleted and re-grabbed. Sends a `replaced` notification.
   - `setupJob()`: creates or updates the custom formats and applies scores to `settings.profileIds`.
   - `setupState()`: formats, plus each profile's state and how many in-scope series use it.
   - `currentJob()`.
