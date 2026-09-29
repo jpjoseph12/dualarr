@@ -1,9 +1,15 @@
 // Notification messages, the request each service gets, and sending to a local receiver.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
 
-import { message, notifyAll, request, send } from '../server/notify.js';
 import { startSink } from './fixtures/sink.mjs';
+
+// notify.js loads config.js, which creates CONFIG_DIR (default /config: not writable on CI).
+process.env.CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dualarr-notify-'));
+const { message, notifyAll, request, send } = await import('../server/notify.js');
 
 let sink;
 before(async () => {
