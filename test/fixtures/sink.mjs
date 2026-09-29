@@ -14,7 +14,7 @@ export function startSink() {
         /* plain text (ntfy) */
       }
       sink.received.push({ method: req.method, url: req.url, headers: req.headers, body: parsed });
-      res.writeHead(sink.fail ? 500 : 200, { 'Content-Type': 'application/json' });
+      res.writeHead(sink.fail ? 500 : 200, { 'Content-Type': 'application/json', Connection: 'close' }); // see mock-sonarr.mjs
       res.end(sink.fail ? '{"error":"nope"}' : '{"ok":true}');
     });
   });

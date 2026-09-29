@@ -78,7 +78,9 @@ export function startSonarr(port = 0) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const send = (code, body) => {
-      res.writeHead(code, { 'Content-Type': 'application/json' });
+      // No keep-alive: tests block the event loop (spawnSync ffmpeg), and a reused socket the
+      // server times out at the same moment fails with ECONNRESET.
+      res.writeHead(code, { 'Content-Type': 'application/json', Connection: 'close' });
       res.end(body === undefined ? '' : JSON.stringify(body));
     };
     if (req.headers['x-api-key'] !== API_KEY) return send(401, { error: 'Unauthorized' });
