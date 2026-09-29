@@ -24,7 +24,8 @@ const post = async (url, body, headers = {}) => {
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
 };
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// "series" is its own plural.
+const plural = (n, word) => `${n} ${word}${n === 1 || word.endsWith('s') ? '' : 's'}`;
 
 const clip = (lines) => lines.slice(0, MAX_LINES).join('\n') + (lines.length > MAX_LINES ? `\n…and ${lines.length - MAX_LINES} more` : '');
 

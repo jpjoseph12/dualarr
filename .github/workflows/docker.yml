@@ -1,0 +1,217 @@
+name: Test, build & publish
+
+# Every push and pull request runs the full test suite (with coverage thresholds) and a smoke
+# test of both real Docker images. Only pushes to main / version tags publish them:
+#   ghcr.io/<repo>:latest        CPU + Vulkan (Intel/AMD GPUs), amd64 and arm64
+#   ghcr.io/<repo>:latest-cuda   CPU + CUDA (NVIDIA GPUs), amd64
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests & coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      # The file checks are tested on real episodes made with ffmpeg (whisper-cli is a stand-in).
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Check the web UI script parses
+        run: npm run test:ui
+
+      # The UI tests drive the web app in Chromium (test/ui.test.js).
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # Unit, API and browser tests against local stand-ins for Sonarr, webhooks, the model download and
+      # whisper-cli — no network or API keys needed. Fails if coverage drops below the
+      # thresholds in package.json (lines 90%, branches 75%, functions 85%).
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Coverage summary
+        if: always()
+        run: node test/coverage-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: ignore
+
+  smoke:
+    name: Container smoke test (${{ matrix.gpu }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [vulkan, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      # The CUDA devel image alone is ~16 GB unpacked, more than a hosted runner has free: drop
+      # toolchains this job doesn't use (.NET, Android, GHC, CodeQL) first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: dualarr:ci
+          build-args: GPU=${{ matrix.gpu }}
+          cache-from: type=gha,scope=${{ matrix.gpu }}
+          cache-to: type=gha,scope=${{ matrix.gpu }},mode=max
+
+      - name: Start it like a user would
+        run: |
+          mkdir -p "$RUNNER_TEMP/config" "$RUNNER_TEMP/media"
+          docker run -d --name dualarr -p 6162:6162 \
+            -e TZ=Europe/London -e PUID=1001 -e PGID=1002 \
+            -v "$RUNNER_TEMP/config:/config" -v "$RUNNER_TEMP/media:/media:ro" dualarr:ci
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:6162/api/health && exit 0
+            sleep 2
+          done
+          echo "Dualarr never answered"; exit 1
+
+      - name: Check the running container
+        run: |
+          set -eux
+          # API and web UI (with version-stamped assets) respond
+          curl -fsS http://localhost:6162/api/health | grep -q '"ok":true'
+          curl -fsS http://localhost:6162/ | grep -q 'app.js?v='
+          curl -fsS -o /dev/null http://localhost:6162/icon.png
+          # the API is locked until an account exists; create one like the first-run screen does
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:6162/api/library)" = 401
+          curl -fsS -c jar -X POST http://localhost:6162/api/auth/setup -H 'Content-Type: application/json' \
+            -d '{"username":"smoke","password":"smoke-test-password"}' | grep -q '"ok":true'
+          # the session works, and changes need the UI's header
+          curl -fsS -b jar http://localhost:6162/api/library | grep -q '"series":\[\]'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -b jar -X PUT http://localhost:6162/api/settings -H 'Content-Type: application/json' -d '{}')" = 403
+          curl -fsS -b jar -X PUT http://localhost:6162/api/settings -H 'Content-Type: application/json' -H 'X-Dualarr: 1' \
+            -d '{"searchPerRun":5}' | grep -q '"searchPerRun":5'
+          # scripts can use the generated API key; a scan without Sonarr says what's missing
+          KEY=$(curl -fsS -b jar http://localhost:6162/api/settings | sed -n 's/.*"apiKey":"\([0-9a-f]*\)".*/\1/p')
+          curl -fsS -H "X-Api-Key: $KEY" http://localhost:6162/api/status | grep -q '"schedule":"0 4 \* \* \*"'
+          curl -s -X POST -H "X-Api-Key: $KEY" http://localhost:6162/api/scan | grep -q 'Connect Sonarr'
+          # ffmpeg and whisper.cpp are in the image and run (on the CPU: there's no GPU here)
+          curl -fsS -H "X-Api-Key: $KEY" http://localhost:6162/api/verify > verify.json
+          cat verify.json
+          grep -q '"ffmpeg":"ffmpeg version' verify.json
+          grep -q '"whisper":"v1\.' verify.json
+          grep -q '"gpu":"${{ matrix.gpu }}"' verify.json
+          grep -q '"device":"CPU"' verify.json
+          docker exec dualarr /opt/whisper/whisper-cli -h 2>&1 | grep -q 'usage:'
+          # runs as PUID:PGID and /config belongs to them
+          docker exec dualarr sh -c 'grep "^Uid:" /proc/1/status' | grep -q $'\t1001\t'
+          test "$(stat -c '%u:%g' "$RUNNER_TEMP/config/dualarr.db")" = "1001:1002"
+          # honours TZ for the schedule
+          docker logs dualarr 2>&1 | grep -q '(TZ Europe/London)'
+
+      - name: Check a real file with a real model
+        run: |
+          set -eux
+          # A spoken-word clip isn't at hand, so this checks the plumbing: the model downloads,
+          # ffmpeg cuts the clips and whisper-cli answers for every track.
+          docker exec dualarr ffmpeg -v error -f lavfi -i "sine=f=440:d=120" -f lavfi -i "sine=f=880:d=120" \
+            -map 0 -map 1 -metadata:s:a:0 language=jpn -metadata:s:a:1 language=eng -c:a aac /tmp/ep.mkv
+          docker exec dualarr node --input-type=module -e "
+            process.env.CONFIG_DIR = '/tmp/smoke';
+            const v = await import('/app/server/verify.js');
+            const model = await v.downloadModel('tiny');
+            const t = await v.tools();
+            const r = await v.checkFile('/tmp/ep.mkv', { model, device: v.deviceArgs('auto', t.devices) });
+            console.log(JSON.stringify(r));
+            if (r.audio.length !== 2 || r.audio.some((a) => !a.lang)) process.exit(1);
+          "
+
+      - name: Container logs
+        if: always()
+        run: docker logs dualarr || true
+
+  image:
+    name: Publish image (${{ matrix.gpu }})
+    needs: [test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - gpu: vulkan
+            suffix: ''
+            platforms: linux/amd64,linux/arm64
+          - gpu: cuda
+            suffix: -cuda
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@v4
+      # The CUDA devel image alone is ~16 GB unpacked, more than a hosted runner has free: drop
+      # toolchains this job doesn't use (.NET, Android, GHC, CodeQL) first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platforms }}
+          build-args: GPU=${{ matrix.gpu }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.gpu }}
+          cache-to: type=gha,scope=${{ matrix.gpu }},mode=max

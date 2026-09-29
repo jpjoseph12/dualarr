@@ -1,0 +1,11 @@
+<CommunityApplications>
+  <Profile>
+**Dualarr** is a companion to **Sonarr** for anime. It checks every anime file's audio and subtitle languages and keeps them in **Japanese with subtitles**, then swaps subbed-only releases for **dual audio** once the English dub comes out.
+
+One click sets up two custom formats in Sonarr (dual audio preferred, dub-only never grabbed); a nightly scan finds files without Japanese audio or subtitles, searches a few series at a time, and can notify you about upgrades and problems.
+
+Setup and caveats: see the [README](https://github.com/jpjoseph12/dualarr#readme). Questions and bugs: [GitHub issues](https://github.com/jpjoseph12/dualarr/issues).
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/public/icon.png</Icon>
+  <WebPage>https://github.com/jpjoseph12/dualarr</WebPage>
+</CommunityApplications>

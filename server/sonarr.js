@@ -25,6 +25,7 @@ export function sonarrClient(settings) {
     seriesById: (id) => req(`/series/${id}`),
     episodeFiles: (seriesId) => req(`/episodefile?seriesId=${seriesId}`),
     episodes: (seriesId) => req(`/episode?seriesId=${seriesId}`),
+    rootFolders: () => req('/rootfolder'),
     seriesHistory: (seriesId) => req(`/history/series?seriesId=${seriesId}`),
     /** Marks a grab as failed: Sonarr blocklists that release so it isn't grabbed again. */
     markFailed: (historyId) => send('POST', `/history/failed/${historyId}`),

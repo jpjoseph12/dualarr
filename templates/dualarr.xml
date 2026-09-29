@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Dualarr</Name>
+  <Repository>ghcr.io/jpjoseph12/dualarr:latest</Repository>
+  <Registry>https://github.com/jpjoseph12/dualarr/pkgs/container/dualarr</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/jpjoseph12/dualarr/issues</Support>
+  <Project>https://github.com/jpjoseph12/dualarr</Project>
+  <ReadMe>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/README.md</ReadMe>
+  <Overview>A companion to Sonarr for anime. Dualarr checks the audio and subtitle languages of every anime file Sonarr has, and keeps them in Japanese with subtitles: it flags files without Japanese audio (English-only dubs) or without subtitles, and replaces them in one click (blocklist, delete, search again). It also sets up two custom formats in Sonarr so subbed-only releases are upgraded to dual audio (Japanese + English) once the dub comes out, and dub-only releases are never grabbed. Optionally it checks the files themselves instead of trusting their language tags: whisper.cpp listens to each audio track and the subtitles are read, which catches mislabelled releases and signs &amp; songs-only subtitles. This runs on the CPU, or on an Intel or AMD iGPU when you pass /dev/dri (for an NVIDIA card, install Dualarr-NVIDIA instead). A nightly scan searches a few series at a time and can notify you (Discord, Telegram, ntfy, Gotify, webhook) about upgrades and problems. The first visit creates your login; then connect Sonarr and apply the custom formats from Settings.</Overview>
+  <Category>MediaApp:Video Downloaders: Tools:</Category>
+  <ExtraSearchTerms>anime sonarr dual audio dub sub subtitles japanese custom formats whisper</ExtraSearchTerms>
+  <Requires>Sonarr v4 with "Analyse video files" on (Settings → Media Management), so it knows each file's audio and subtitle languages.</Requires>
+  <WebUI>http://[IP]:[PORT:6162]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/templates/dualarr.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/public/icon.png</Icon>
+  <Screenshot>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/docs/screenshots/library.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/docs/screenshots/check-files.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/docs/screenshots/settings.png</Screenshot>
+  <License>MIT</License>
+  <MinVer>6.12.0</MinVer>
+  <Date>2026-09-28</Date>
+  <Changes>
+### 0.2.0 (2026-09-28)
+- Check files: whisper.cpp listens to each audio track and the subtitles are read, instead of trusting the language tags. Catches mislabelled releases, untagged tracks and signs &amp; songs-only subtitles.
+- Runs on the CPU, an Intel or AMD iGPU (/dev/dri), or an NVIDIA GPU (the new Dualarr-NVIDIA template).
+- New optional settings in this template: the media folder, and /dev/dri for an iGPU.
+
+### 0.1.0 (2026-09-28)
+- First release.
+- Checks every anime file's audio and subtitle languages from Sonarr's media info: dual audio, subbed, no subtitles, no Japanese audio.
+- One-click Sonarr setup: "Dual Audio" and "Dub Only" custom formats, scored in the quality profiles you pick.
+- Nightly scan with a paced search; Replace blocklists, deletes and re-searches files that break the rules.
+- Notifications (Discord, Telegram, ntfy, Gotify, webhook); login, API key for scripts.
+  </Changes>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="WebUI Port" Target="6162" Default="6162" Mode="tcp" Description="Web UI and API." Type="Port" Display="always" Required="true" Mask="false">6162</Config>
+  <Config Name="AppData" Target="/config" Default="/mnt/user/appdata/dualarr" Mode="rw" Description="Database (settings, login and the last scan). Keep it: everything you set up lives here." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/dualarr</Config>
+  <Config Name="Media" Target="/media" Default="" Mode="ro" Description="Optional, for Check files: the folder with your anime, read-only. Easiest is the same host folder at the same container path Sonarr uses (e.g. /tv or /data); otherwise add a path mapping in Dualarr's Settings." Type="Path" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="iGPU (Intel/AMD)" Target="/dev/dri" Default="" Mode="" Description="Optional, for Check files on an Intel or AMD integrated GPU: set to /dev/dri. Leave empty to check on the CPU. For an NVIDIA card, install Dualarr-NVIDIA instead." Type="Device" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID the app runs as." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID the app runs as." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="Reset login" Target="DUALARR_RESET_AUTH" Default="false" Mode="" Description="Forgot the password? Set to true, start the container, create a new login in the web UI, then set this back to false. Settings are kept." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="File creation mask." Type="Variable" Display="advanced" Required="false" Mask="false">002</Config>
+</Container>

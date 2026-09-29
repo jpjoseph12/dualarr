@@ -1,6 +1,6 @@
 {
   "name": "dualarr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Keeps anime in Sonarr in Japanese with subtitles, and swaps subbed releases for dual audio when the dub comes out.",
   "type": "module",
   "private": true,
@@ -20,5 +20,8 @@
   "dependencies": {
     "croner": "^9.1.0",
     "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }
