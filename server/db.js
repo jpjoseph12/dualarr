@@ -62,10 +62,17 @@ export const SETTING_DEFAULTS = {
   subtitleLanguage: 'any',
   dualScore: 2000,
   profileIds: [],
+  // Per quality profile: { [profileId]: { mode: 'dual' | 'original', lang: 'ja' | 'zh' | … | 'auto' } }.
+  // Profiles not listed want dual audio with Japanese as the original language.
+  profileRules: {},
   schedule: '0 4 * * *',
   autoSearch: true,
   searchPerRun: 10,
   searchAgainDays: 7,
+  // After a scheduled scan, replace files that break the rules without asking: 'off',
+  // 'language' (wrong audio language) or 'all' (also no subtitles); at most replacePerRun a scan.
+  autoReplace: 'off',
+  replacePerRun: 10,
   notifiers: [],
   notifyUpgrades: true,
   notifyProblems: true,

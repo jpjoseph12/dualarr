@@ -334,7 +334,7 @@ describe('library', () => {
     assert.ok((await ok('GET', '/api/series/2')).searchedAt);
     assert.equal((await me.ui('POST', '/api/search', { ids: [] })).status, 400);
     const none = await me.ui('POST', '/api/search', { ids: [999] });
-    assert.deepEqual([none.status, none.body.error], [400, 'Nothing to search for — every file already has dual audio']);
+    assert.deepEqual([none.status, none.body.error], [400, 'Nothing to search for — every file is already as it should be']);
   });
 
   test('replace: blocklists, deletes, searches and returns the rescanned series', async () => {
@@ -367,6 +367,26 @@ describe('Sonarr setup', () => {
     const again = await ok('POST', '/api/setup', {});
     assert.deepEqual(again.summary.profiles, ['Anime', 'HD-1080p']);
     assert.equal(sonarr.state.customFormats.length, 3);
+    assert.equal(again.rescanning, false, 'nothing about the verdicts changed');
+  });
+
+  test('a profile can want its original language only, in any language; changing it rescans', async () => {
+    for (const profileRules of [[], { 1: { mode: 'japanese' } }, { 1: { lang: 'klingon' } }, { 1: { lang: 'und' } }]) {
+      assert.equal((await me.ui('POST', '/api/setup', { profileRules })).status, 400, JSON.stringify(profileRules));
+    }
+    const r = await ok('POST', '/api/setup', { profileRules: { 4: { mode: 'original', lang: 'auto' }, 1: { mode: 'dual', lang: 'ja' }, abc: { mode: 'original' } } });
+    assert.equal(r.rescanning, true);
+    assert.deepEqual(store.getSettings().profileRules, { 4: { mode: 'original', lang: 'auto' } }, 'defaults and junk ids are not stored');
+    assert.deepEqual(r.profiles.map((p) => [p.name, p.mode, p.lang]), [['Anime', 'dual', 'ja'], ['HD-1080p', 'original', 'auto'], ['Ultra-HD', 'dual', 'ja']]);
+    await waitIdle();
+    const mushishi = await ok('GET', '/api/series/3');
+    assert.deepEqual([mushishi.mode, mushishi.lang], ['original', 'ja']);
+    assert.equal((await ok('POST', '/api/setup', {})).rescanning, false);
+    // Settings can change it too, and back to the default.
+    assert.equal((await ok('PUT', '/api/settings', { profileRules: {} })).rescanning, true);
+    await waitIdle();
+    assert.equal((await ok('GET', '/api/series/3')).mode, 'dual');
+    await ok('POST', '/api/setup', {});
   });
 });
 
@@ -394,6 +414,14 @@ describe('rules changes', () => {
 
 describe('checking files', () => {
   const MEDIA = path.join(CONFIG_DIR, 'media');
+
+  test('automatic replacement: off, wrong language, or everything; capped', async () => {
+    assert.equal(store.getSettings().autoReplace, 'off', 'off by default: it deletes files');
+    assert.equal((await me.ui('PUT', '/api/settings', { autoReplace: 'yes' })).status, 400);
+    const s = await ok('PUT', '/api/settings', { autoReplace: 'language', replacePerRun: 500 });
+    assert.deepEqual([s.autoReplace, s.replacePerRun, s.rescanning], ['language', 100, false]);
+    await ok('PUT', '/api/settings', { autoReplace: 'off', replacePerRun: 10 });
+  });
 
   test('settings are validated', async () => {
     for (const bad of [

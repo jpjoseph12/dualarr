@@ -22,8 +22,14 @@
   <Screenshot>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/docs/screenshots/settings.png</Screenshot>
   <License>MIT</License>
   <MinVer>6.12.0</MinVer>
-  <Date>2026-09-28</Date>
+  <Date>2026-09-29</Date>
   <Changes>
+### 0.3.0 (2026-09-29)
+- Per quality profile: dual audio (original + English), or the original language only. In an original-only profile, dual audio is never grabbed and existing dual audio files can be replaced.
+- Replace wrong files automatically (off by default): after a scheduled scan, files in the wrong audio language (optionally also without subtitles) are blocklisted, deleted and searched again, until the right one arrives.
+- Any original language: Japanese by default, or Chinese, Korean and more, or each series' own from Sonarr (for donghua next to anime).
+- Dualarr-NVIDIA: Check files really runs on the GPU now. The CUDA backend needed a library (NCCL) that was missing from the image, so whisper quietly fell back to the CPU.
+
 ### 0.2.0 (2026-09-28)
 - Check files: whisper.cpp listens to each audio track and the subtitles are read, instead of trusting the language tags. Catches mislabelled releases, untagged tracks and signs &amp; songs-only subtitles.
 - Runs on the CPU, an Intel or AMD iGPU (/dev/dri), or an NVIDIA GPU (the new Dualarr-NVIDIA template).

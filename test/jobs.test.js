@@ -100,7 +100,7 @@ describe('scanning', () => {
       if (f.id === 302) f.mediaInfo = { audioLanguages: 'eng', subtitles: '' };
     }
     const r = await jobs.scanJob('scan');
-    assert.deepEqual(r.summary.upgraded, [{ id: 1, title: 'Frieren', files: 2 }]);
+    assert.deepEqual(r.summary.upgraded, [{ id: 1, title: 'Frieren', files: 2, mode: 'dual' }]);
     assert.deepEqual(r.summary.problems, [{ id: 3, title: 'Mushishi', noJapanese: 1, noSubs: 0 }]);
     assert.deepEqual(events(), ['upgraded', 'problems']);
     assert.equal(r.summary.notified, 2);
@@ -235,6 +235,87 @@ describe('replacing', () => {
     assert.equal(r.status, 'partial');
     assert.match(r.summary.warnings[0], /^Could not blocklist Dandadan\.S01E03\.1080p\.WEB\.English\.Dub: .*HTTP 500/);
     assert.deepEqual([r.summary.replaced.blocklisted, sonarr.state.deleted], [0, [203]]);
+  });
+});
+
+describe('automatic replacement', () => {
+  test('off by default: a scheduled scan deletes nothing', async () => {
+    await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(sonarr.state.deleted, []);
+  });
+
+  test('wrong language: blocklisted, deleted and searched again after a scheduled scan', async () => {
+    store.saveSettings({ autoReplace: 'language', autoSearch: false });
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(r.summary.autoReplaced, [{ id: 2, title: 'Dandadan', files: 1, episodes: 1 }]);
+    assert.deepEqual([sonarr.state.failed, sonarr.state.deleted], [[900], [203]], 'the English dub; no-subs files are left alone');
+    assert.deepEqual(sonarr.state.commands, [{ name: 'EpisodeSearch', episodeIds: [1007] }]);
+    assert.equal(store.getSeries(2).counts.noJapanese, 0);
+    assert.ok(events().includes('replaced'));
+    // Manual scans never replace.
+    sonarr.state.deleted.length = 0;
+    await jobs.scanJob('scan');
+    assert.deepEqual(sonarr.state.deleted, []);
+  });
+
+  test('a file without a grab to blocklist is left for a manual Replace; unmonitored series are skipped', async () => {
+    store.saveSettings({ autoReplace: 'all', autoSearch: false });
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    // Mushishi S01E01 has no subtitles but no grab in the history; Old Anime is unmonitored.
+    assert.deepEqual(sonarr.state.deleted, [203]);
+    assert.equal(r.summary.autoReplaceSkipped, 1);
+    assert.equal(r.status, 'ok', 'not a warning: it is reported, not a failure');
+  });
+
+  test('capped per scan, and dual audio counts as wrong in an original-only profile', async () => {
+    store.saveSettings({ autoReplace: 'language', replacePerRun: 1, autoSearch: false, profileRules: { 1: { mode: 'original', lang: 'ja' } } });
+    // Give the dual audio files grabs, so they can be blocklisted.
+    sonarr.state.history[1] = [101, 102].map((id) => ({ id: 800 + id, eventType: 'grabbed', date: '2026-09-01T00:00:00Z', sourceTitle: `Frieren.${id}.Dual.Audio` }));
+    for (const f of sonarr.state.files) if (f.seriesId === 1 && f.seasonNumber === 1) f.sceneName = `Frieren.${f.id}.Dual.Audio`;
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.equal(r.summary.autoReplaced.reduce((n, x) => n + x.files, 0), 1, 'one file this scan');
+    assert.equal(sonarr.state.deleted.length, 1);
+  });
+});
+
+describe('per-profile rules', () => {
+  test('an original-only profile: subbed is done, dual audio is replaced like a dub', async () => {
+    store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'ja' } } });
+    await jobs.scanJob('scan');
+    const frieren = store.getSeries(1);
+    assert.deepEqual([frieren.mode, rules.seriesState(frieren)], ['original', 'problem'], 'season 1 is dual audio');
+    assert.equal(store.getSeries(3).mode, 'dual', 'other profiles keep dual audio');
+    const r = await jobs.replaceJob(2, [201, 202, 203]);
+    assert.equal(r.status, 'ok');
+    assert.deepEqual(sonarr.state.deleted, [201, 203], 'the subbed file is kept');
+    assert.deepEqual(store.getSeries(2).counts, { dual: 0, subbed: 1, noSubs: 0, noJapanese: 0, unknown: 0 });
+    assert.equal(rules.seriesState(store.getSeries(2)), 'done');
+  });
+
+  test("'auto' language: a Chinese show needs Chinese audio, anime still Japanese", async () => {
+    sonarr.state.series.push({ id: 7, title: 'Link Click', year: 2021, titleSlug: 'link-click', seriesType: 'anime', monitored: true, qualityProfileId: 1, originalLanguage: { name: 'Chinese' }, images: [] });
+    const lc = (id, audio) => ({ id, seriesId: 7, seasonNumber: 1, relativePath: `Link Click/Season 1/Link Click - S01E0${id - 700}.mkv`, size: 1e9, mediaInfo: { audioLanguages: audio, subtitles: 'eng' } });
+    sonarr.state.files.push(lc(701, 'chi'), lc(702, 'jpn'));
+    store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'auto' } } });
+    await jobs.scanJob('scan');
+    const row = store.getSeries(7);
+    assert.deepEqual([row.lang, row.originalLanguage, row.files.map((f) => f.status)], ['zh', 'Chinese', ['subbed', 'noJapanese']], 'a Japanese dub of a donghua has no original audio');
+    assert.deepEqual([store.getSeries(2).lang, store.getSeries(2).files.map((f) => f.status)], ['ja', ['dual', 'subbed', 'noJapanese']]);
+  });
+
+  test('setup blocks dual audio only in original-only profiles', async () => {
+    store.saveSettings({ profileIds: [1, 4], profileRules: { 4: { mode: 'original', lang: 'ja' } } });
+    const r = await jobs.setupJob();
+    const ids = r.result;
+    const dualScore = (id) => sonarr.state.qualityProfiles.find((p) => p.id === id).formatItems.find((fi) => fi.format === ids.dual).score;
+    assert.deepEqual([dualScore(1), dualScore(4)], [2000, rules.DUB_SCORE]);
+    const client = (await import('../server/sonarr.js')).sonarrClient(store.getSettings());
+    const st = await jobs.setupState(client, store.getSettings());
+    assert.deepEqual(st.profiles.map((p) => [p.name, p.mode, p.lang, p.ready]), [
+      ['Anime', 'dual', 'ja', true],
+      ['HD-1080p', 'original', 'ja', true],
+      ['Ultra-HD', 'dual', 'ja', false],
+    ]);
   });
 });
 

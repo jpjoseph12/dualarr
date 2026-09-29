@@ -5,21 +5,23 @@ A standalone companion to Sonarr for anime. It keeps every file in Japanese audi
 ## Done
 
 - `config.js`: CONFIG_DIR (default `/config`), PORT (default **6162**; Courarr uses 6161), TZ, VERSION, `log`.
-- `db.js`: tables `settings`, `series` (latest scan per Sonarr series as JSON, plus `searched_at`), `sessions` and `runs` (activity log). Includes `SETTING_DEFAULTS`: Sonarr URL/key, `scope` ('anime' | 'japanese'), `requireSubtitles`, `subtitleLanguage` ('any' | 'en' | …), `dualScore` (2000), `profileIds`, `schedule` ('0 4 * * *'), `autoSearch`, `searchPerRun` (10), `searchAgainDays` (7), notifiers, `notifyUpgrades`, `notifyProblems`, auth fields and `apiKey`.
+- `db.js`: tables `settings`, `series` (latest scan per Sonarr series as JSON, plus `searched_at`), `sessions` and `runs` (activity log). Includes `SETTING_DEFAULTS`: Sonarr URL/key, `scope` ('anime' | 'japanese'), `requireSubtitles`, `subtitleLanguage` ('any' | 'en' | …), `dualScore` (2000), `profileIds`, `profileRules` (per profile `{ mode: 'dual' | 'original', lang: 'ja' | … | 'auto' }`; only non-defaults stored), `schedule` ('0 4 * * *'), `autoSearch`, `searchPerRun` (10), `searchAgainDays` (7), `autoReplace` ('off' | 'language' | 'all') and `replacePerRun` (10), notifiers, `notifyUpgrades`, `notifyProblems`, auth fields and `apiKey`.
 - `auth.js`: copied from Courarr (scrypt login, cookie sessions `dualarr_session`, API key, login rate limit). The feed key was removed, and the reset env var is `DUALARR_RESET_AUTH`.
 - `sonarr.js`: the v4 API client (series, seriesById, episodeFiles, episodes, seriesHistory, markFailed, deleteEpisodeFile, command, customFormats/saveCustomFormat, qualityProfiles/qualityProfile/saveQualityProfile). Empty response bodies return null.
 - `rules.js`: **pure logic, no I/O**:
   - `langs()` normalises `mediaInfo.audioLanguages` / `subtitles` ("jpn/eng" from v4, "Japanese / English" from v3) to codes.
-  - `classifyFile()` gives each file a verdict: `dual | subbed | noSubs | noJapanese | unknown`. It treats a "HardSub" release name as subtitled.
+  - `classifyFile()` gives each file a verdict: `dual | subbed | noSubs | noJapanese | unknown`, against `opts.lang` (the original language, Japanese by default; the `noJapanese` key means "no original-language audio" and keeps its name for stored scans). It treats a "HardSub" release name as subtitled.
+  - `MODES` (dual / original: the good verdict, what needs a search, what is replaceable), `profileRule(profileId, profileRules)`, `seriesLanguage(lang, originalLanguage)` ('auto' = the series' original language in Sonarr). Rows store `mode`, `lang` and `originalLanguage`; rows without `mode` are dual.
   - `inScope`, `summariseSeries`, `seriesState` (done/waiting/problem/unknown/empty), `totals`, `diffScans` (upgraded series and new problems since the last scan; series seen for the first time are skipped).
   - `searchPlan()`: SeasonSearch when a whole season needs work, otherwise EpisodeSearch for the monitored episodes.
   - `grabFor()`: finds the history "grabbed" record behind a file, via the import record's `importedPath` or the release name, so Replace can blocklist it.
-  - Custom formats: `CF_NAMES`, `DUAL_RE`, `DUB_RE`, `customFormats()`. `profileWithScores()` sets dual = dualScore and dub = -10000, turns upgrades on, sets `cutoffFormatScore` ≥ dualScore and ≥ the top other format score + 1, and raises the minimum score just enough that dub-only releases can't be grabbed. `profileState()` reports readiness and problems per profile.
+  - Custom formats: `CF_NAMES`, `DUAL_RE`, `DUB_RE`, `customFormats()`. `profileWithScores(p, ids, dualScore, mode)` sets dual = dualScore (−10000 in original mode, which also lowers `cutoffFormatScore` to the top other score and leaves upgrades alone) and dub = -10000, turns upgrades on, sets `cutoffFormatScore` ≥ dualScore and ≥ the top other format score + 1, and raises the minimum score just enough that dub-only releases can't be grabbed. `profileState()` reports readiness and problems per profile.
 - `notify.js`: adapted from Courarr. Events are `upgraded`, `problems`, `error` and `test`.
 - `jobs.js`: a serialised job runner, and every job is recorded in `runs`:
   - `scanJob(trigger, { autoSearch })`: scan, notify, then (on the schedule) `dueForSearch()`, which searches least-recently-searched first and is capped by `searchPerRun` and `searchAgainDays`.
   - `searchJob(ids)`: manual search.
-  - `replaceJob(seriesId, fileIds)`: only for `noSubs`/`noJapanese` files. It marks the grab failed (blocklisting it), deletes the file, sends an EpisodeSearch and rescans the series.
+  - `replaceJob(seriesId, fileIds)`: only for the series' mode's replaceable files (plus `dual` in original mode), judged with the stored checks. It marks the grab failed (blocklisting it), deletes the file, sends an EpisodeSearch and rescans the series.
+  - `replaceDue()` (scheduled scans, when `autoReplace` isn't off): `rules.autoReplaceable(mode, setting)` files in monitored series, capped by `replacePerRun`, through `replaceFiles(..., { requireGrab: true })`, so files with no grab to blocklist are skipped (counted in `autoReplaceSkipped`) rather than deleted and re-grabbed. Sends a `replaced` notification.
   - `setupJob()`: creates or updates the custom formats and applies scores to `settings.profileIds`.
   - `setupState()`: formats, plus each profile's state and how many in-scope series use it.
   - `currentJob()`.
