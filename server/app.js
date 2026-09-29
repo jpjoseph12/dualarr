@@ -92,7 +92,25 @@ function sanitizeMappings(list) {
 }
 
 // Settings that change a file's verdict: saving a change rescans the library.
-const RULE_KEYS = ['scope', 'requireSubtitles', 'subtitleLanguage'];
+const RULE_KEYS = ['scope', 'requireSubtitles', 'subtitleLanguage', 'profileRules'];
+const rulesChangedBetween = (a, b) => RULE_KEYS.some((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+
+/**
+ * { [profileId]: { mode, lang } }. Only profiles that differ from the default (dual audio,
+ * Japanese) are stored, sorted by id so an unchanged choice compares equal.
+ */
+function profileRules(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw bad('profileRules must be an object of profile id → { mode, lang }');
+  const out = {};
+  for (const [id, r] of Object.entries(v).sort((a, b) => a[0] - b[0])) {
+    const mode = r?.mode ?? 'dual';
+    const lang = r?.lang ?? 'ja';
+    if (!(mode in rules.MODES)) throw bad(`Unknown mode "${mode}" — use dual or original`);
+    if (lang !== 'auto' && (!rules.LANG_NAMES[lang] || lang === 'und')) throw bad(`Unknown language "${lang}"`);
+    if (/^[1-9]\d{0,8}$/.test(id) && (mode !== 'dual' || lang !== 'ja')) out[id] = { mode, lang };
+  }
+  return out;
+}
 
 /** Validates a settings patch; only the fields present are changed. */
 function sanitizeSettings(b, saved) {
@@ -116,6 +134,7 @@ function sanitizeSettings(b, saved) {
   for (const k of ['requireSubtitles', 'autoSearch', 'notifyUpgrades', 'notifyProblems']) if (b[k] !== undefined) patch[k] = !!b[k];
   if (b.dualScore !== undefined) patch.dualScore = clampInt(b.dualScore, 1, 1_000_000, saved.dualScore);
   if (b.profileIds !== undefined) patch.profileIds = intList(b.profileIds).filter((n) => n > 0);
+  if (b.profileRules !== undefined) patch.profileRules = profileRules(b.profileRules);
   if (b.searchPerRun !== undefined) patch.searchPerRun = clampInt(b.searchPerRun, 1, 100, saved.searchPerRun);
   if (b.searchAgainDays !== undefined) patch.searchAgainDays = clampInt(b.searchAgainDays, 1, 365, saved.searchAgainDays);
   if (b.schedule !== undefined) {
@@ -355,12 +374,18 @@ app.post('/api/setup', async (req, res) => {
   const b = req.body || {};
   sonarrOr400();
   const saved = store.getSettings();
-  const patch = sanitizeSettings({ profileIds: b.profileIds ?? saved.profileIds, dualScore: b.dualScore ?? saved.dualScore }, saved);
+  const patch = sanitizeSettings(
+    { profileIds: b.profileIds ?? saved.profileIds, dualScore: b.dualScore ?? saved.dualScore, profileRules: b.profileRules ?? saved.profileRules },
+    saved,
+  );
   if (!patch.profileIds.length) throw bad('Pick at least one quality profile');
   store.saveSettings(patch);
   const run = jobResult(await setupJob());
   const settings = store.getSettings();
-  res.json({ ...run, ...(await setupState(sonarrOr400(settings), settings)) });
+  // A profile whose mode or language changed changes its series' verdicts: rescan quietly.
+  const rescanning = rulesChangedBetween(saved, settings);
+  if (rescanning) scanJob('rules', { notify: false });
+  res.json({ ...run, ...(await setupState(sonarrOr400(settings), settings)), rescanning });
 });
 
 // ---------- checking files ----------
@@ -423,7 +448,7 @@ app.put('/api/settings', (req, res) => {
   const saved = store.saveSettings(sanitizeSettings(req.body || {}, before));
   if (saved.schedule !== before.schedule) schedule(saved.schedule);
   // Stored verdicts were made with the old rules; rescan (quietly: nothing about the files changed).
-  const rulesChanged = RULE_KEYS.some((k) => saved[k] !== before[k]);
+  const rulesChanged = rulesChangedBetween(saved, before);
   if (rulesChanged && sonarrClient(saved)) scanJob('rules', { notify: false });
   res.json({ ...publicSettings(), rescanning: rulesChanged && !!sonarrClient(saved) });
 });

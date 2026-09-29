@@ -43,7 +43,20 @@ export function job(trigger, work) {
   return p;
 }
 
-const ruleOptions = (s) => ({ requireSubtitles: s.requireSubtitles, subtitleLanguage: s.subtitleLanguage });
+/**
+ * How a series' files are judged. The mode (dual audio or original only) and the original language
+ * come from its quality profile; `series` is a Sonarr series or a stored row.
+ */
+function ruleOptions(settings, series = {}) {
+  const rule = rules.profileRule(series.qualityProfileId, settings.profileRules);
+  const original = typeof series.originalLanguage === 'string' ? series.originalLanguage : series.originalLanguage?.name;
+  return {
+    requireSubtitles: settings.requireSubtitles,
+    subtitleLanguage: settings.subtitleLanguage,
+    mode: rule.mode,
+    lang: rules.seriesLanguage(rule.lang, original),
+  };
+}
 
 /** Runs `fn` over `items` with at most `n` in flight. */
 async function pool(items, n, fn) {
@@ -63,7 +76,7 @@ async function pool(items, n, fn) {
 
 /** Stores a series' verdicts from its Sonarr files and the checks made of them. */
 function saveVerdicts(s, files, settings) {
-  const row = rules.summariseSeries(s, files, ruleOptions(settings), store.getChecks(s.id));
+  const row = rules.summariseSeries(s, files, ruleOptions(settings, s), store.getChecks(s.id));
   store.saveSeries(row);
   store.pruneChecks(s.id, files.map((f) => f.id));
   return row;
@@ -148,9 +161,9 @@ export function scanJob(trigger, { autoSearch = false, notify = true } = {}) {
  * first, then the newest. `force` re-checks everything.
  */
 export function dueForVerify(fetched, settings, { force = false, limit = settings.verifyPerRun } = {}) {
-  const opts = ruleOptions(settings);
   const due = [];
   for (const { s, files } of fetched) {
+    const opts = ruleOptions(settings, s);
     const checks = force ? new Map() : store.getChecks(s.id);
     for (const f of files) {
       const c = checks.get(f.id);
@@ -200,7 +213,7 @@ async function verifyFiles(due, settings, summary) {
       summary.warnings.push(`Checking ${f.relativePath}: ${e.message}`);
     }
     store.saveCheck(f.id, s.id, f.size || 0, check);
-    const notes = rules.classifyFile(f, ruleOptions(settings), { ...check, size: f.size || 0 }).notes;
+    const notes = rules.classifyFile(f, ruleOptions(settings, s), { ...check, size: f.size || 0 }).notes;
     if (!check.error && notes.length && v.mismatches.length < 50) v.mismatches.push({ title: s.title, file: f.relativePath, notes });
   }
   v.seconds = Math.round((Date.now() - t0) / 1000);
@@ -246,7 +259,7 @@ export function verifyTestJob() {
       const f = files.find((x) => fs.existsSync(verify.mapPath(x.path, settings.pathMappings)));
       if (!f) continue;
       const check = await verify.checkFile(verify.mapPath(f.path, settings.pathMappings), setup);
-      const found = rules.classifyFile(f, ruleOptions(settings), { ...check, size: f.size || 0 });
+      const found = rules.classifyFile(f, ruleOptions(settings, row), { ...check, size: f.size || 0 });
       summary.tested = { title: row.title, file: f.relativePath, device: setup.device.label, seconds: check.seconds };
       return { title: row.title, file: f.relativePath, check, status: found.status, notes: found.notes, device: setup.device.label };
     }
@@ -258,7 +271,7 @@ export function verifyTestJob() {
 
 /** Asks Sonarr to search for better releases of the files in a series that need them. */
 export async function searchSeries(client, row) {
-  const plan = rules.searchPlan(row.files, await client.episodes(row.id));
+  const plan = rules.searchPlan(row.files, await client.episodes(row.id), rules.MODES[row.mode || 'dual'].needsSearch);
   for (const seasonNumber of plan.seasons) await client.command({ name: 'SeasonSearch', seriesId: row.id, seasonNumber });
   if (plan.episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds: plan.episodeIds });
   store.markSearched(row.id);
@@ -294,7 +307,7 @@ async function searchDue(client, settings, summary) {
 export function searchJob(ids) {
   return job('search', async (summary, client) => {
     const rows = ids.map(store.getSeries).filter((r) => r && rules.needsSearch(r));
-    if (!rows.length) throw new Error('Nothing to search for — every file already has dual audio');
+    if (!rows.length) throw new Error('Nothing to search for — every file is already as it should be');
     summary.searched = [];
     for (const row of rows) {
       try {
@@ -309,25 +322,24 @@ export function searchJob(ids) {
 
 // ---------- replacing ----------
 
-/** Re-scans one series (after a replace) and stores it. */
-async function rescan(client, settings, id) {
-  return saveVerdicts(await client.seriesById(id), await client.episodeFiles(id), settings);
-}
-
 /**
- * Replaces files that break the rules (no Japanese audio / no subtitles): blocklists the release
- * that produced each one (when Sonarr's history says which), deletes the file, and searches for
- * the episodes again. Files that are fine by now are left alone.
+ * Replaces files that break the rules (no original-language audio / no subtitles / dual audio in
+ * an original-only series): blocklists the release that produced each one (when Sonarr's history
+ * says which), deletes the file, and searches for the episodes again. Files are judged as the
+ * library shows them (with their checks), and ones that are fine by now are left alone.
  */
 export function replaceJob(seriesId, fileIds) {
   return job('replace', async (summary, client, settings) => {
-    const [files, episodes, history] = await Promise.all([
+    const [series, files, episodes, history] = await Promise.all([
+      client.seriesById(seriesId),
       client.episodeFiles(seriesId),
       client.episodes(seriesId),
       client.seriesHistory(seriesId).catch(() => []),
     ]);
-    const opts = ruleOptions(settings);
-    const targets = files.filter((f) => fileIds.includes(f.id) && rules.REPLACEABLE.includes(rules.classifyFile(f, opts).status));
+    const opts = ruleOptions(settings, series);
+    const replaceable = rules.MODES[opts.mode].replaceable;
+    const checks = store.getChecks(seriesId);
+    const targets = files.filter((f) => fileIds.includes(f.id) && replaceable.includes(rules.classifyFile(f, opts, checks.get(f.id)).status));
     if (!targets.length) throw new Error('None of those files break the rules any more — scan again');
     let blocklisted = 0;
     for (const f of targets) {
@@ -345,7 +357,7 @@ export function replaceJob(seriesId, fileIds) {
     const replacedIds = new Set(targets.map((f) => f.id));
     const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
     if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
-    const row = await rescan(client, settings, seriesId);
+    const row = saveVerdicts(series, await client.episodeFiles(seriesId), settings);
     summary.replaced = { title: row.title, files: targets.length, blocklisted, episodes: episodeIds.length };
     log(`Replaced ${targets.length} file(s) of ${row.title} (${blocklisted} blocklisted)`);
     return row;
@@ -369,7 +381,7 @@ export function setupJob() {
       // One missing profile (deleted in Sonarr since) shouldn't stop the others.
       try {
         const p = await client.qualityProfile(id);
-        await client.saveQualityProfile(rules.profileWithScores(p, ids, settings.dualScore));
+        await client.saveQualityProfile(rules.profileWithScores(p, ids, settings.dualScore, rules.profileRule(id, settings.profileRules).mode));
         summary.profiles.push(p.name);
       } catch (e) {
         summary.warnings.push(`Quality profile ${id}: ${e.message}`);
@@ -394,6 +406,9 @@ export async function setupState(client, settings) {
   for (const s of series) if (rules.inScope(s, settings.scope)) used.set(s.qualityProfileId, (used.get(s.qualityProfileId) || 0) + 1);
   return {
     formats: ids,
-    profiles: profiles.map((p) => ({ ...rules.profileState(p, ids), series: used.get(p.id) || 0 })),
+    profiles: profiles.map((p) => {
+      const rule = rules.profileRule(p.id, settings.profileRules);
+      return { ...rules.profileState(p, ids, rule.mode), lang: rule.lang, series: used.get(p.id) || 0 };
+    }),
   };
 }

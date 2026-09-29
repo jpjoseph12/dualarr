@@ -15,8 +15,21 @@ const ALIASES = {
   it: ['it', 'ita', 'italian', 'italiano'],
   ar: ['ar', 'ara', 'arabic'],
   ru: ['ru', 'rus', 'russian'],
-  zh: ['zh', 'chi', 'zho', 'chinese'],
+  zh: ['zh', 'chi', 'zho', 'chinese', 'cmn', 'yue', 'mandarin', 'cantonese'],
   ko: ['ko', 'kor', 'korean'],
+  hi: ['hi', 'hin', 'hindi'],
+  th: ['th', 'tha', 'thai'],
+  vi: ['vi', 'vie', 'vietnamese'],
+  id: ['id', 'ind', 'indonesian'],
+  tl: ['tl', 'tgl', 'fil', 'tagalog', 'filipino'],
+  tr: ['tr', 'tur', 'turkish'],
+  pl: ['pl', 'pol', 'polish'],
+  nl: ['nl', 'dut', 'nld', 'dutch'],
+  sv: ['sv', 'swe', 'swedish'],
+  no: ['no', 'nor', 'nob', 'norwegian'],
+  da: ['da', 'dan', 'danish'],
+  fi: ['fi', 'fin', 'finnish'],
+  he: ['he', 'heb', 'hebrew'],
   und: ['und', 'unknown', 'undetermined', 'mul', 'zxx'],
 };
 const CODE = new Map(Object.entries(ALIASES).flatMap(([code, names]) => names.map((n) => [n, code])));
@@ -43,19 +56,50 @@ export function langs(value) {
 
 /** What a file can be, best first. */
 export const STATUSES = ['dual', 'subbed', 'noSubs', 'noJapanese', 'unknown'];
-/** Files that should be searched for a better release. */
-export const NEEDS_SEARCH = ['subbed', 'noSubs', 'noJapanese'];
-/** Files that break the rules outright: safe to delete and grab again. */
-export const REPLACEABLE = ['noSubs', 'noJapanese'];
+
+/**
+ * What a series aims for, set per Sonarr quality profile (with its original language, Japanese
+ * unless set otherwise):
+ *  dual      original + English audio: subbed files wait for the dub, then upgrade
+ *  original  the original language only: subbed is the goal, and dual audio is replaced like a dub
+ *   good         the verdict that is the goal
+ *   needsSearch  files that should be searched for a better release
+ *   replaceable  files that break the rules outright: safe to delete and grab again
+ */
+export const MODES = {
+  dual: { good: 'dual', needsSearch: ['subbed', 'noSubs', 'noJapanese'], replaceable: ['noSubs', 'noJapanese'] },
+  original: { good: 'subbed', needsSearch: ['dual', 'noSubs', 'noJapanese'], replaceable: ['dual', 'noSubs', 'noJapanese'] },
+};
+export const NEEDS_SEARCH = MODES.dual.needsSearch;
+export const REPLACEABLE = MODES.dual.replaceable;
+
+/**
+ * A quality profile's rule (`profileRules`: { [profileId]: { mode, lang } }): dual audio with
+ * Japanese unless set. `lang` 'auto' takes each series' original language from Sonarr.
+ */
+export function profileRule(profileId, profileRules) {
+  const r = profileRules?.[profileId] || {};
+  return { mode: MODES[r.mode] ? r.mode : 'dual', lang: r.lang === 'auto' || (r.lang && r.lang !== 'und' && LANG_NAMES[r.lang]) ? r.lang : 'ja' };
+}
+
+/** The language a series should be in: the rule's, or with 'auto' its original language in Sonarr. */
+export function seriesLanguage(lang, originalLanguage) {
+  if (lang !== 'auto') return lang || 'ja';
+  const code = langs(originalLanguage)[0];
+  return code && code !== 'und' && LANG_NAMES[code] ? code : 'ja';
+}
+const goal = (row) => MODES[row.mode] || MODES.dual;
 
 const HARDSUB = /\bhard[ ._-]?sub(bed|s)?\b/i;
 
 /** Names for the notes a file check writes. */
 export const LANG_NAMES = {
-  ja: 'Japanese', en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French', de: 'German', it: 'Italian',
-  ar: 'Arabic', ru: 'Russian', zh: 'Chinese', ko: 'Korean', und: 'undetermined',
+  ja: 'Japanese', zh: 'Chinese', ko: 'Korean', en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French', de: 'German',
+  it: 'Italian', ar: 'Arabic', ru: 'Russian', hi: 'Hindi', th: 'Thai', vi: 'Vietnamese', id: 'Indonesian', tl: 'Tagalog',
+  tr: 'Turkish', pl: 'Polish', nl: 'Dutch', sv: 'Swedish', no: 'Norwegian', da: 'Danish', fi: 'Finnish', he: 'Hebrew',
+  und: 'undetermined',
 };
-const langName = (code) => LANG_NAMES[code] || code;
+export const langName = (code) => LANG_NAMES[code] || code;
 
 /** Below this (averaged over the clips), a detected audio language is a guess and the tag wins. */
 export const AUDIO_MIN_P = 0.5;
@@ -90,16 +134,17 @@ export function checkedLanguages(check) {
 }
 
 /**
- * One Sonarr episode file -> its languages and verdict:
- *  dual       Japanese + English audio, with subtitles
- *  subbed     Japanese audio with subtitles, no English audio yet (waiting for the dub)
- *  noSubs     Japanese audio but no (matching) subtitles
- *  noJapanese no Japanese audio track (e.g. an English-only dub)
+ * One Sonarr episode file -> its languages and verdict. "Original" is `lang`, Japanese unless the
+ * profile says otherwise (the status keys keep their Japanese names, as stored since 0.1):
+ *  dual       original + English audio, with subtitles
+ *  subbed     original audio with subtitles, no English audio (waiting for the dub, or the goal)
+ *  noSubs     original audio but no (matching) subtitles
+ *  noJapanese no original-language audio track (e.g. an English-only dub)
  *  unknown    Sonarr has no media info, or the audio tracks aren't tagged with a language
  * With a `check` (the file itself was listened to and its subtitles read, see verify.js) of the
  * same file, its findings replace Sonarr's tags.
  */
-export function classifyFile(f, { requireSubtitles = true, subtitleLanguage = 'any' } = {}, check = null) {
+export function classifyFile(f, { requireSubtitles = true, subtitleLanguage = 'any', lang = 'ja' } = {}, check = null) {
   const mi = f.mediaInfo;
   // A check of an older file with the same id (replaced in place) doesn't count.
   const checked = check && !check.error && check.size === (f.size || 0) ? check : null;
@@ -114,9 +159,10 @@ export function classifyFile(f, { requireSubtitles = true, subtitleLanguage = 'a
 
   let status;
   if ((!mi && !checked) || !known.length) status = 'unknown';
-  else if (!known.includes('ja')) status = 'noJapanese';
+  else if (!known.includes(lang)) status = 'noJapanese';
   else if (requireSubtitles && !subsOk) status = 'noSubs';
-  else if (known.includes('en')) status = 'dual';
+  // For an English original, any second language counts as the "dub".
+  else if (lang === 'en' ? known.some((l) => l !== 'en') : known.includes('en')) status = 'dual';
   else status = 'subbed';
 
   return {
@@ -141,7 +187,7 @@ export const inScope = (s, scope) =>
 
 const emptyCounts = () => Object.fromEntries(STATUSES.map((k) => [k, 0]));
 
-/** A series and its classified files, as stored and shown. */
+/** A series and its classified files, as stored and shown. `opts.mode`/`opts.lang`: its profile's rule. */
 export function summariseSeries(s, files, opts, checks = new Map()) {
   const classified = files.map((f) => classifyFile(f, opts, checks.get(f.id))).sort((a, b) => a.season - b.season || a.path.localeCompare(b.path));
   const counts = emptyCounts();
@@ -155,6 +201,9 @@ export function summariseSeries(s, files, opts, checks = new Map()) {
     monitored: s.monitored !== false,
     seriesType: s.seriesType,
     qualityProfileId: s.qualityProfileId,
+    mode: MODES[opts?.mode] ? opts.mode : 'dual',
+    lang: opts?.lang || 'ja',
+    originalLanguage: s.originalLanguage?.name || null,
     counts,
     total: classified.length,
     verified: classified.filter((f) => f.verified).length,
@@ -162,17 +211,20 @@ export function summariseSeries(s, files, opts, checks = new Map()) {
   };
 }
 
-/** done / waiting (subbed, dub not out yet) / problem (rule broken) / unknown / empty. */
+/**
+ * done / waiting (subbed, dub not out yet) / problem (rule broken) / unknown / empty. Original-only
+ * series never wait: a subbed file is done, and a dual audio one is a problem.
+ */
 export function seriesState(row) {
   const c = row.counts;
   if (!row.total) return 'empty';
-  if (c.noJapanese || c.noSubs) return 'problem';
-  if (c.subbed) return 'waiting';
+  if (c.noJapanese || c.noSubs || (row.mode === 'original' && c.dual)) return 'problem';
+  if (c.subbed && row.mode !== 'original') return 'waiting';
   if (c.unknown === row.total) return 'unknown';
   return 'done';
 }
 
-export const needsSearch = (row) => NEEDS_SEARCH.some((k) => row.counts[k] > 0);
+export const needsSearch = (row) => goal(row).needsSearch.some((k) => row.counts[k] > 0);
 
 export function totals(rows) {
   const files = emptyCounts();
@@ -188,8 +240,9 @@ export function totals(rows) {
 
 /**
  * What changed since the last scan, per series. Upgraded files get new file ids, so this
- * compares counts: fewer files needing work + more dual audio = upgraded. Series seen for the
- * first time are skipped, so the first scan doesn't announce the whole library.
+ * compares counts: fewer files needing work + more of the goal (dual audio, or subbed for an
+ * original-only series) = upgraded. Series seen for the first time are skipped, so the first
+ * scan doesn't announce the whole library.
  */
 export function diffScans(prevById, rows) {
   const upgraded = [];
@@ -197,12 +250,15 @@ export function diffScans(prevById, rows) {
   for (const r of rows) {
     const p = prevById.get(r.id);
     if (!p) continue;
-    const need = (c) => c.subbed + c.noSubs + c.noJapanese;
-    const gained = Math.min(r.counts.dual - p.counts.dual, need(p.counts) - need(r.counts));
-    if (gained > 0) upgraded.push({ id: r.id, title: r.title, files: gained });
-    const noJapanese = r.counts.noJapanese - p.counts.noJapanese;
-    const noSubs = r.counts.noSubs - p.counts.noSubs;
-    if (noJapanese > 0 || noSubs > 0) problems.push({ id: r.id, title: r.title, noJapanese: Math.max(0, noJapanese), noSubs: Math.max(0, noSubs) });
+    const g = goal(r);
+    const need = (c) => g.needsSearch.reduce((n, k) => n + c[k], 0);
+    const gained = Math.min(r.counts[g.good] - p.counts[g.good], need(p.counts) - need(r.counts));
+    // The language is only named when it isn't Japanese, the default.
+    const lang = r.lang && r.lang !== 'ja' ? { lang: r.lang } : {};
+    if (gained > 0) upgraded.push({ id: r.id, title: r.title, files: gained, mode: r.mode || 'dual', ...lang });
+    const more = (k) => Math.max(0, r.counts[k] - p.counts[k]);
+    const found = { noJapanese: more('noJapanese'), noSubs: more('noSubs'), ...(r.mode === 'original' ? { dualAudio: more('dual') } : {}) };
+    if (Object.values(found).some(Boolean)) problems.push({ id: r.id, title: r.title, ...found, ...lang });
   }
   return { upgraded, problems };
 }
@@ -399,45 +455,57 @@ export function customFormats() {
 const topOtherScore = (p, ours) => Math.max(0, ...(p.formatItems || []).filter((fi) => !ours.has(fi.format)).map((fi) => fi.score || 0));
 
 /**
- * A quality profile with Dualarr's scores applied:
+ * A quality profile with Dualarr's scores applied. For a dual audio profile:
  *  - dual audio scores `dualScore`, dub-only DUB_SCORE,
  *  - upgrades are on, and continue until a file scores at least the dual audio score (so a
  *    subbed file keeps being upgraded until dual audio arrives),
  *  - the minimum score is high enough that a dub-only release is never grabbed.
+ * For an original-only profile, dual audio scores DUB_SCORE too (never grabbed), and "upgrade
+ * until" comes back down to what other formats can reach, so Sonarr doesn't keep searching for a
+ * dual audio upgrade it may no longer take. Upgrades are left as they are.
  */
-export function profileWithScores(p, ids, dualScore) {
-  const ours = new Map([[ids.dual, dualScore], [ids.dub, DUB_SCORE]]);
+export function profileWithScores(p, ids, dualScore, mode = 'dual') {
+  const original = mode === 'original';
+  const ours = new Map([[ids.dual, original ? DUB_SCORE : dualScore], [ids.dub, DUB_SCORE]]);
   const names = { [ids.dual]: CF_NAMES.dual, [ids.dub]: CF_NAMES.dub };
   const items = (p.formatItems || []).map((fi) => (ours.has(fi.format) ? { ...fi, score: ours.get(fi.format) } : fi));
   for (const [format, score] of ours) if (!items.some((fi) => fi.format === format)) items.push({ format, name: names[format], score });
   const top = topOtherScore(p, ours);
+  const minFormatScore = Math.max(p.minFormatScore ?? 0, Math.min(0, DUB_SCORE + top + 1));
+  if (original) return { ...p, formatItems: items, cutoffFormatScore: Math.min(p.cutoffFormatScore ?? 0, top), minFormatScore };
   return {
     ...p,
     formatItems: items,
     upgradeAllowed: true,
     cutoffFormatScore: Math.max(p.cutoffFormatScore ?? 0, dualScore, top + 1),
-    minFormatScore: Math.max(p.minFormatScore ?? 0, Math.min(0, DUB_SCORE + top + 1)),
+    minFormatScore,
   };
 }
 
-/** How a quality profile stands with respect to Dualarr's formats. */
-export function profileState(p, ids) {
+/** How a quality profile stands with respect to Dualarr's formats, in the given mode. */
+export function profileState(p, ids, mode = 'dual') {
   const ours = new Set([ids.dual, ids.dub].filter(Boolean));
   const score = (id) => (id ? (p.formatItems || []).find((fi) => fi.format === id)?.score ?? null : null);
   const dual = score(ids.dual);
   const dub = score(ids.dub);
   const top = topOtherScore(p, ours);
+  const blocked = (s) => s < 0 && s + top < (p.minFormatScore ?? 0);
   const problems = [];
   if (!ids.dual || !ids.dub) problems.push('custom formats not created yet');
-  else {
+  else if (mode === 'original') {
+    if (!blocked(dual ?? 0)) problems.push('dual audio releases can still be grabbed');
+    if (!blocked(dub ?? 0)) problems.push('dub-only releases can still be grabbed');
+    if ((p.cutoffFormatScore ?? 0) > top) problems.push(`“upgrade until” score (${p.cutoffFormatScore}) can only be reached by dual audio`);
+  } else {
     if (!(dual > top)) problems.push(`dual audio scores ${dual ?? 0}, not above the best other format (${top})`);
-    if (!(dub < 0) || (dub ?? 0) + top >= (p.minFormatScore ?? 0)) problems.push('dub-only releases can still be grabbed');
+    if (!blocked(dub ?? 0)) problems.push('dub-only releases can still be grabbed');
     if (!p.upgradeAllowed) problems.push('upgrades are off');
     if (!((p.cutoffFormatScore ?? 0) > top)) problems.push(`“upgrade until” score (${p.cutoffFormatScore ?? 0}) stops before dual audio`);
   }
   return {
     id: p.id,
     name: p.name,
+    mode,
     dual,
     dub,
     top,

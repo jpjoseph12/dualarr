@@ -100,7 +100,7 @@ describe('scanning', () => {
       if (f.id === 302) f.mediaInfo = { audioLanguages: 'eng', subtitles: '' };
     }
     const r = await jobs.scanJob('scan');
-    assert.deepEqual(r.summary.upgraded, [{ id: 1, title: 'Frieren', files: 2 }]);
+    assert.deepEqual(r.summary.upgraded, [{ id: 1, title: 'Frieren', files: 2, mode: 'dual' }]);
     assert.deepEqual(r.summary.problems, [{ id: 3, title: 'Mushishi', noJapanese: 1, noSubs: 0 }]);
     assert.deepEqual(events(), ['upgraded', 'problems']);
     assert.equal(r.summary.notified, 2);
@@ -235,6 +235,47 @@ describe('replacing', () => {
     assert.equal(r.status, 'partial');
     assert.match(r.summary.warnings[0], /^Could not blocklist Dandadan\.S01E03\.1080p\.WEB\.English\.Dub: .*HTTP 500/);
     assert.deepEqual([r.summary.replaced.blocklisted, sonarr.state.deleted], [0, [203]]);
+  });
+});
+
+describe('per-profile rules', () => {
+  test('an original-only profile: subbed is done, dual audio is replaced like a dub', async () => {
+    store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'ja' } } });
+    await jobs.scanJob('scan');
+    const frieren = store.getSeries(1);
+    assert.deepEqual([frieren.mode, rules.seriesState(frieren)], ['original', 'problem'], 'season 1 is dual audio');
+    assert.equal(store.getSeries(3).mode, 'dual', 'other profiles keep dual audio');
+    const r = await jobs.replaceJob(2, [201, 202, 203]);
+    assert.equal(r.status, 'ok');
+    assert.deepEqual(sonarr.state.deleted, [201, 203], 'the subbed file is kept');
+    assert.deepEqual(store.getSeries(2).counts, { dual: 0, subbed: 1, noSubs: 0, noJapanese: 0, unknown: 0 });
+    assert.equal(rules.seriesState(store.getSeries(2)), 'done');
+  });
+
+  test("'auto' language: a Chinese show needs Chinese audio, anime still Japanese", async () => {
+    sonarr.state.series.push({ id: 7, title: 'Link Click', year: 2021, titleSlug: 'link-click', seriesType: 'anime', monitored: true, qualityProfileId: 1, originalLanguage: { name: 'Chinese' }, images: [] });
+    const lc = (id, audio) => ({ id, seriesId: 7, seasonNumber: 1, relativePath: `Link Click/Season 1/Link Click - S01E0${id - 700}.mkv`, size: 1e9, mediaInfo: { audioLanguages: audio, subtitles: 'eng' } });
+    sonarr.state.files.push(lc(701, 'chi'), lc(702, 'jpn'));
+    store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'auto' } } });
+    await jobs.scanJob('scan');
+    const row = store.getSeries(7);
+    assert.deepEqual([row.lang, row.originalLanguage, row.files.map((f) => f.status)], ['zh', 'Chinese', ['subbed', 'noJapanese']], 'a Japanese dub of a donghua has no original audio');
+    assert.deepEqual([store.getSeries(2).lang, store.getSeries(2).files.map((f) => f.status)], ['ja', ['dual', 'subbed', 'noJapanese']]);
+  });
+
+  test('setup blocks dual audio only in original-only profiles', async () => {
+    store.saveSettings({ profileIds: [1, 4], profileRules: { 4: { mode: 'original', lang: 'ja' } } });
+    const r = await jobs.setupJob();
+    const ids = r.result;
+    const dualScore = (id) => sonarr.state.qualityProfiles.find((p) => p.id === id).formatItems.find((fi) => fi.format === ids.dual).score;
+    assert.deepEqual([dualScore(1), dualScore(4)], [2000, rules.DUB_SCORE]);
+    const client = (await import('../server/sonarr.js')).sonarrClient(store.getSettings());
+    const st = await jobs.setupState(client, store.getSettings());
+    assert.deepEqual(st.profiles.map((p) => [p.name, p.mode, p.lang, p.ready]), [
+      ['Anime', 'dual', 'ja', true],
+      ['HD-1080p', 'original', 'ja', true],
+      ['Ultra-HD', 'dual', 'ja', false],
+    ]);
   });
 });
 

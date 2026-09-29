@@ -259,6 +259,37 @@ describe('the web UI', { skip }, () => {
     assert.deepEqual(await texts('.tile b'), ['0', '2', '2', '1']);
   });
 
+  test('a profile can want its original language only, Japanese first; the library follows', async () => {
+    await go('#/settings', '#setup-body .profiles');
+    assert.equal(await page.locator('[data-rule-mode="1"]').inputValue(), 'dual');
+    assert.equal(await page.locator('[data-rule-lang="1"]').inputValue(), 'ja');
+    const langs = await page.locator('[data-rule-lang="1"] option').allTextContents();
+    assert.deepEqual([langs[0], langs[1], langs.at(-1)], ['Japanese', 'Chinese', 'Each series’ own (from Sonarr)']);
+
+    await page.selectOption('[data-rule-mode="1"]', 'original');
+    await clearToasts();
+    await page.click('#setup-apply');
+    await toast('rescanning with the new rules');
+    await idle();
+    const anime = sonarr.state.qualityProfiles.find((p) => p.id === 1);
+    assert.equal(anime.formatItems.find((f) => f.name === 'Dual Audio (Dualarr)').score, -10000, 'dual audio is never grabbed');
+
+    await go('#/', '#lib-table');
+    assert.equal(await page.locator('[data-row="2"] .pill.rule').textContent(), 'Japanese only');
+    assert.equal(await page.locator('[data-row="4"] .pill.rule').count(), 0, 'other profiles are unchanged');
+    await openRow(2);
+    assert.equal(await text('[data-detail="2"] .detail-head > span'), '1 file to fix — this series wants Japanese audio only');
+    assert.match(await page.locator('[data-detail="2"] tbody tr').first().innerText(), /Dual audio[\s\S]*Replace/);
+
+    // Back to dual audio for the tests after this one.
+    await go('#/settings', '#setup-body .profiles');
+    await page.selectOption('[data-rule-mode="1"]', 'dual');
+    await clearToasts();
+    await page.click('#setup-apply');
+    await toast('rescanning with the new rules');
+    await idle();
+  });
+
   test('notifiers: add, send a test, save, and remove', async () => {
     await go('#/settings', '#setup-body .profiles');
     await page.selectOption('#nt-type', 'webhook');

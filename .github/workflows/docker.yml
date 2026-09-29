@@ -59,9 +59,10 @@ jobs:
           path: lcov.info
           if-no-files-found: ignore
 
+  # Builds and checks the images alongside the tests, not after them: the CUDA build takes the
+  # longest, so waiting for the tests first only makes every run slower. Publishing needs both.
   smoke:
     name: Container smoke test (${{ matrix.gpu }})
-    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

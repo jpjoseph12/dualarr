@@ -18,7 +18,8 @@ describe('languages', () => {
     assert.deepEqual(rules.langs('English (SDH)'), ['en']);
     assert.deepEqual(rules.langs('und/jpn'), ['und', 'ja']);
     assert.deepEqual(rules.langs('fre/ger/spa/por/ita/ara/rus/chi/kor'), ['fr', 'de', 'es', 'pt', 'it', 'ar', 'ru', 'zh', 'ko']);
-    assert.deepEqual(rules.langs('tha'), ['tha'], 'unknown codes pass through');
+    assert.deepEqual(rules.langs('tha/hin/fil/Mandarin Chinese'), ['th', 'hi', 'tl', 'zh']);
+    assert.deepEqual(rules.langs('mri'), ['mri'], 'unknown codes pass through');
     assert.deepEqual(rules.langs(''), []);
     assert.deepEqual(rules.langs(undefined), []);
   });
@@ -234,11 +235,93 @@ describe('series', () => {
       { id: 7, title: 'New Show', counts: c(0, 0, 3) }, // first seen: not news
     ];
     assert.deepEqual(rules.diffScans(prev, now), {
-      upgraded: [{ id: 1, title: 'Frieren', files: 2 }, { id: 2, title: 'Dandadan', files: 1 }],
+      upgraded: [{ id: 1, title: 'Frieren', files: 2, mode: 'dual' }, { id: 2, title: 'Dandadan', files: 1, mode: 'dual' }],
       problems: [{ id: 3, title: 'Mushishi', noJapanese: 1, noSubs: 0 }],
     });
     // A new episode arriving as dual audio isn't an upgrade.
     assert.deepEqual(rules.diffScans(new Map([[1, { id: 1, counts: c(1, 1) }]]), [{ id: 1, title: 'x', counts: c(2, 1) }]).upgraded, []);
+  });
+});
+
+describe('per-profile rules: mode and original language', () => {
+  const counts = (c) => ({ dual: 0, subbed: 0, noSubs: 0, noJapanese: 0, unknown: 0, ...c });
+  const row = (c, mode) => ({ total: Object.values(counts(c)).reduce((a, b) => a + b, 0), counts: counts(c), mode });
+
+  test('profileRule: dual audio with Japanese unless set; junk falls back', () => {
+    const r = { 4: { mode: 'original', lang: 'zh' }, 5: { lang: 'auto' }, 6: { mode: 'bogus', lang: 'und' } };
+    assert.deepEqual(rules.profileRule(1, r), { mode: 'dual', lang: 'ja' });
+    assert.deepEqual(rules.profileRule(4, r), { mode: 'original', lang: 'zh' });
+    assert.deepEqual(rules.profileRule(5, r), { mode: 'dual', lang: 'auto' });
+    assert.deepEqual(rules.profileRule(6, r), { mode: 'dual', lang: 'ja' });
+    assert.deepEqual(rules.profileRule(1, undefined), { mode: 'dual', lang: 'ja' });
+  });
+
+  test("'auto' takes the series' original language from Sonarr, else Japanese", () => {
+    assert.equal(rules.seriesLanguage('auto', 'Chinese'), 'zh');
+    assert.equal(rules.seriesLanguage('auto', 'Korean'), 'ko');
+    assert.equal(rules.seriesLanguage('auto', 'Unknown'), 'ja');
+    assert.equal(rules.seriesLanguage('auto', null), 'ja');
+    assert.equal(rules.seriesLanguage('zh', 'Japanese'), 'zh', 'a fixed language wins');
+  });
+
+  test('verdicts follow the original language: a Chinese show needs Chinese audio', () => {
+    const zh = { lang: 'zh' };
+    assert.equal(verdict(f('chi', 'eng'), zh), 'subbed');
+    assert.equal(verdict(f('chi/eng', 'eng'), zh), 'dual');
+    assert.equal(verdict(f('jpn', 'eng'), zh), 'noJapanese', 'a Japanese dub of a donghua has no original audio');
+    assert.equal(verdict(f('jpn', 'eng')), 'subbed', 'Japanese stays the default');
+    assert.equal(verdict(f('eng/spa', 'eng'), { lang: 'en' }), 'dual', 'an English original: any second language is the dub');
+    assert.equal(verdict(f('eng', 'eng'), { lang: 'en' }), 'subbed');
+  });
+
+  test('summaries carry the rule and the series’ original language', () => {
+    const s = { id: 1, title: 'Link Click', seriesType: 'anime', originalLanguage: { name: 'Chinese' } };
+    const r = rules.summariseSeries(s, [f('chi', 'eng')], { mode: 'original', lang: 'zh' });
+    assert.deepEqual([r.mode, r.lang, r.originalLanguage, r.counts.subbed], ['original', 'zh', 'Chinese', 1]);
+    assert.equal(rules.summariseSeries(s, [], { mode: 'bogus' }).mode, 'dual');
+  });
+
+  test('original only: subbed is done; dual audio is a problem to search for and replace', () => {
+    assert.equal(rules.seriesState(row({ subbed: 3 }, 'original')), 'done');
+    assert.equal(rules.seriesState(row({ subbed: 3 }, 'dual')), 'waiting');
+    assert.equal(rules.seriesState(row({ subbed: 2, dual: 1 }, 'original')), 'problem');
+    assert.equal(rules.needsSearch(row({ subbed: 3 }, 'original')), false);
+    assert.equal(rules.needsSearch(row({ dual: 1 }, 'original')), true);
+    assert.equal(rules.needsSearch(row({ dual: 1 })), false, 'rows scanned before modes existed want dual audio');
+    assert.deepEqual(rules.MODES.original.replaceable, ['dual', 'noSubs', 'noJapanese']);
+    const files = [{ id: 1, season: 1, status: 'dual' }, { id: 2, season: 1, status: 'subbed' }];
+    const eps = [{ id: 11, seasonNumber: 1, episodeFileId: 1 }, { id: 12, seasonNumber: 1, episodeFileId: 2 }];
+    assert.deepEqual(rules.searchPlan(files, eps, rules.MODES.original.needsSearch), { seasons: [], episodeIds: [11] });
+  });
+
+  test('diffScans: the goal replacing dual audio is an upgrade; new dual audio is a problem', () => {
+    const prev = new Map([[1, { id: 1, counts: counts({ dual: 2 }) }], [2, { id: 2, counts: counts({ subbed: 2 }) }]]);
+    const rows = [
+      { id: 1, title: 'Link Click', mode: 'original', lang: 'zh', counts: counts({ subbed: 2 }) },
+      { id: 2, title: 'Mushishi', mode: 'original', lang: 'ja', counts: counts({ subbed: 1, dual: 1 }) },
+    ];
+    assert.deepEqual(rules.diffScans(prev, rows), {
+      upgraded: [{ id: 1, title: 'Link Click', files: 2, mode: 'original', lang: 'zh' }],
+      problems: [{ id: 2, title: 'Mushishi', noJapanese: 0, noSubs: 0, dualAudio: 1 }],
+    });
+  });
+
+  test('original-only profiles block dual audio in Sonarr, and "upgrade until" comes back down', () => {
+    const ids = { dual: 10, dub: 11 };
+    const dualProfile = rules.profileWithScores(
+      { id: 1, name: 'Anime', upgradeAllowed: false, cutoffFormatScore: 0, minFormatScore: 0, formatItems: [{ format: 1, score: 500 }] },
+      ids,
+      2000,
+    );
+    const p = rules.profileWithScores(dualProfile, ids, 2000, 'original');
+    assert.deepEqual(p.formatItems.map((fi) => fi.score), [500, rules.DUB_SCORE, rules.DUB_SCORE]);
+    assert.deepEqual([p.cutoffFormatScore, p.minFormatScore, p.upgradeAllowed], [500, 0, true], 'upgrades are left as they were');
+    assert.deepEqual([rules.profileState(p, ids, 'original').ready, rules.profileState(p, ids, 'original').mode], [true, 'original']);
+    assert.equal(rules.profileState(p, ids).ready, false, 'not ready for dual audio any more');
+    assert.deepEqual(rules.profileState(dualProfile, ids, 'original').problems, [
+      'dual audio releases can still be grabbed',
+      '“upgrade until” score (2000) can only be reached by dual audio',
+    ]);
   });
 });
 

@@ -62,6 +62,9 @@ export const SETTING_DEFAULTS = {
   subtitleLanguage: 'any',
   dualScore: 2000,
   profileIds: [],
+  // Per quality profile: { [profileId]: { mode: 'dual' | 'original', lang: 'ja' | 'zh' | … | 'auto' } }.
+  // Profiles not listed want dual audio with Japanese as the original language.
+  profileRules: {},
   schedule: '0 4 * * *',
   autoSearch: true,
   searchPerRun: 10,

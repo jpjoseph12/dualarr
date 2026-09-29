@@ -94,14 +94,33 @@ async function copyText(text) {
 
 // ---------- vocabulary ----------
 
-const VERDICTS = {
-  dual: ['Dual audio', 'Japanese and English audio, with subtitles'],
-  subbed: ['Subbed', 'Japanese audio with subtitles — waiting for the dub'],
-  noSubs: ['No subtitles', 'Japanese audio, but no (matching) subtitle track'],
-  noJapanese: ['No Japanese audio', 'No Japanese audio track — e.g. an English-only dub'],
-  unknown: ['Unknown', 'Sonarr has no media info for it, or its audio tracks have no language'],
+// The verdicts, in order. Their wording depends on the series' rule: see verdictText.
+const VERDICTS = { dual: 1, subbed: 1, noSubs: 1, noJapanese: 1, unknown: 1 };
+/**
+ * A verdict's label and explanation. `ctx` is a series (its `mode` and `lang`), or
+ * { lang: null } for a library with several original languages. Japanese unless said otherwise.
+ */
+function verdictText(k, ctx = {}) {
+  const L = ctx.lang === null ? 'original-language' : langName(ctx.lang || 'ja');
+  const Short = ctx.lang === null ? 'original' : L;
+  const only = ctx.mode === 'original';
+  return {
+    dual: ['Dual audio', only ? `${L} and English audio — this series wants ${L} only` : `${L} and English audio, with subtitles`],
+    subbed: ['Subbed', only ? `${L} audio with subtitles — as wanted` : `${L} audio with subtitles — waiting for the dub`],
+    noSubs: ['No subtitles', `${L} audio, but no (matching) subtitle track`],
+    noJapanese: [`No ${Short} audio`, `No ${L} audio track — e.g. a dub only`],
+    unknown: ['Unknown', 'Sonarr has no media info for it, or its audio tracks have no language'],
+  }[k];
+}
+// Mirrors rules.MODES on the server.
+const MODES = {
+  dual: { good: 'dual', replaceable: ['noSubs', 'noJapanese'] },
+  original: { good: 'subbed', replaceable: ['dual', 'noSubs', 'noJapanese'] },
 };
-const REPLACEABLE = ['noSubs', 'noJapanese'];
+const goal = (series) => MODES[series?.mode] || MODES.dual;
+/** "Japanese only", "Chinese only"… for original-only series; empty for dual audio with Japanese. */
+const ruleLabel = (series) =>
+  series?.mode === 'original' ? `${langName(series.lang || 'ja')} only` : series?.lang && series.lang !== 'ja' ? `${langName(series.lang)} + English` : '';
 const STATES = {
   done: 'Done',
   waiting: 'Waiting for dub',
@@ -134,11 +153,19 @@ const JOBS = {
   verify: 'Checking files',
   'verify-test': 'Testing a file check',
 };
-const LANG_NAMES = { ja: 'Japanese', en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French', de: 'German', it: 'Italian', ar: 'Arabic', ru: 'Russian', zh: 'Chinese', ko: 'Korean', und: 'undetermined' };
+// The languages a series' original language can be (mirrors rules.LANG_NAMES), Japanese first.
+const LANG_NAMES = {
+  ja: 'Japanese', zh: 'Chinese', ko: 'Korean', en: 'English', es: 'Spanish', pt: 'Portuguese', fr: 'French', de: 'German',
+  it: 'Italian', ar: 'Arabic', ru: 'Russian', hi: 'Hindi', th: 'Thai', vi: 'Vietnamese', id: 'Indonesian', tl: 'Tagalog',
+  tr: 'Turkish', pl: 'Polish', nl: 'Dutch', sv: 'Swedish', no: 'Norwegian', da: 'Danish', fi: 'Finnish', he: 'Hebrew',
+  und: 'undetermined',
+};
 const langName = (c) => LANG_NAMES[c] || c || '—';
 
-const verdictBadge = (k, n, withLabel = true) =>
-  `<span class="vb v-${k}" title="${esc(VERDICTS[k][1])}"><i></i>${n !== undefined ? `${n.toLocaleString()}${withLabel ? ' ' : ''}` : ''}${withLabel ? esc(VERDICTS[k][0]) : ''}</span>`;
+const verdictBadge = (k, n, withLabel = true, ctx = {}) => {
+  const [label, why] = verdictText(k, ctx);
+  return `<span class="vb v-${k}" title="${esc(why)}"><i></i>${n !== undefined ? `${n.toLocaleString()}${withLabel ? ' ' : ''}` : ''}${withLabel ? esc(label) : ''}</span>`;
+};
 const stateBadge = (s) => `<span class="vb s-${s}"><i></i>${esc(STATES[s])}</span>`;
 const langsText = (arr) => (arr?.length ? arr.join(' · ') : '—');
 
@@ -279,6 +306,9 @@ async function viewLibrary(token) {
   }
 
   const searchable = () => lib.series.filter((s) => s.monitored && s.needsSearch);
+  // Library-wide counts name the language only when every series has the same one.
+  const libLangs = new Set(lib.series.map((s) => s.lang || 'ja'));
+  const libCtx = { lang: libLangs.size > 1 ? null : [...libLangs][0] || 'ja' };
   const totalFiles = Object.values(t.files).reduce((a, b) => a + b, 0);
   const running = !!state.status?.running;
 
@@ -289,7 +319,7 @@ async function viewLibrary(token) {
       <div class="tile" style="--c:var(--err)"><b>${t.states.problem.toLocaleString()}</b><span>With problems</span></div>
       <div class="tile" style="--c:var(--faint)"><b>${(t.states.unknown + t.states.empty).toLocaleString()}</b><span>Unknown or empty</span></div>
     </div>
-    <div class="file-counts"><span>${plural(totalFiles, 'file')}:</span>${Object.keys(VERDICTS).map((k) => verdictBadge(k, t.files[k])).join('')}${
+    <div class="file-counts"><span>${plural(totalFiles, 'file')}:</span>${Object.keys(VERDICTS).map((k) => verdictBadge(k, t.files[k], true, libCtx)).join('')}${
       t.verified ? `<span class="faint" title="Listened to and read by Dualarr, not just their tags">· ${plural(t.verified, 'file')} checked</span>` : ''
     }</div>`;
 
@@ -302,14 +332,16 @@ async function viewLibrary(token) {
     const url = seriesUrl(lib, s);
     const badges = Object.keys(VERDICTS)
       .filter((k) => s.counts[k])
-      .map((k) => verdictBadge(k, s.counts[k], false))
+      .map((k) => verdictBadge(k, s.counts[k], false, s))
       .join('');
     const open = expanded.has(s.id);
     return `<tr class="series${open ? ' open' : ''}" data-row="${s.id}">
         <td class="hide-sm" style="width:62px">${s.poster ? `<img class="poster" src="${esc(s.poster)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : '<div class="poster none">—</div>'}</td>
         <td>
           ${url ? `<a class="title" href="${esc(url)}" target="_blank" rel="noopener" data-stop>${esc(s.title)}${icon('ext')}</a>` : `<span class="title">${esc(s.title)}</span>`}
-          <div class="sub">${[s.year, plural(s.total, 'file'), s.monitored ? '' : 'unmonitored'].filter(Boolean).join(' · ')}</div>
+          <div class="sub">${[s.year, plural(s.total, 'file'), s.monitored ? '' : 'unmonitored'].filter(Boolean).join(' · ')}${
+            ruleLabel(s) ? ` <span class="pill rule" title="Set on its quality profile in Settings → Sonarr setup">${esc(ruleLabel(s))}</span>` : ''
+          }</div>
         </td>
         <td><div class="vbs">${badges || '<span class="faint">—</span>'}</div></td>
         <td class="hide-sm">${stateBadge(s.state)}</td>
@@ -326,12 +358,18 @@ async function viewLibrary(token) {
   const detailHtml = (s, detail) => {
     if (!detail) return loadingBlock('Loading files…');
     if (detail.error) return `<div class="detail-head" style="color:var(--err)">${esc(detail.error)}</div>`;
-    // Dual audio files are only listed when checking them found something off.
-    const files = detail.files.filter((f) => f.status !== 'dual' || f.notes?.length);
-    const bad = files.filter((f) => REPLACEABLE.includes(f.status));
-    const notDual = files.filter((f) => f.status !== 'dual').length;
+    // Files that are as wanted (dual audio, or subbed for an original-only series) are only listed
+    // when checking them found something off.
+    const g = goal(s);
+    const files = detail.files.filter((f) => f.status !== g.good || f.notes?.length);
+    const bad = files.filter((f) => g.replaceable.includes(f.status));
+    const notGood = files.filter((f) => f.status !== g.good).length;
+    const only = s.mode === 'original' && `${langName(s.lang || 'ja')} audio only`;
+    const summary = only
+      ? notGood ? `${plural(notGood, 'file')} to fix — this series wants ${only}` : `Every file has ${only}.`
+      : notGood ? `${plural(notGood, 'file')} without dual audio` : 'Every file has dual audio.';
     const head = `<div class="detail-head">
-        <span>${notDual ? `${plural(notDual, 'file')} without dual audio` : 'Every file has dual audio.'}${
+        <span>${summary}${
           state.settings.verify ? ` · ${detail.verified || 0} of ${plural(detail.total, 'file')} checked` : ''
         }</span>
         <span class="spacer"></span>
@@ -351,8 +389,8 @@ async function viewLibrary(token) {
               }</td>
               <td class="langs">${esc(langsText(f.audio))}</td>
               <td class="langs">${esc(langsText(f.subs))}</td>
-              <td>${verdictBadge(f.status)}${f.verified ? `<div class="checked" title="Dualarr listened to the audio and read the subtitles">${icon('check')}checked</div>` : ''}</td>
-              <td style="text-align:right">${REPLACEABLE.includes(f.status) ? `<button class="btn btn-sm btn-danger" type="button" data-replace="${s.id}" data-files="${f.id}" title="Blocklist this release, delete the file and search again">${icon('swap')}Replace</button>` : ''}</td>
+              <td>${verdictBadge(f.status, undefined, true, s)}${f.verified ? `<div class="checked" title="Dualarr listened to the audio and read the subtitles">${icon('check')}checked</div>` : ''}</td>
+              <td style="text-align:right">${g.replaceable.includes(f.status) ? `<button class="btn btn-sm btn-danger" type="button" data-replace="${s.id}" data-files="${f.id}" title="Blocklist this release, delete the file and search again">${icon('swap')}Replace</button>` : ''}</td>
             </tr>`,
           )
           .join('')}</tbody>
@@ -489,7 +527,7 @@ async function viewLibrary(token) {
       const ok = await confirmDialog({
         title: `Replace ${plural(ids.length, 'file')}?`,
         body: `<p class="muted">For each file, Dualarr marks the release that produced it as failed in Sonarr (so it is blocklisted and not grabbed again), <b>deletes the file</b>, and asks Sonarr to search for the episode again.</p>
-          <ul>${files.map((f) => `<li>${esc(f.path)} — ${esc(VERDICTS[f.status][0])}</li>`).join('')}</ul>`,
+          <ul>${files.map((f) => `<li>${esc(f.path)} — ${esc(verdictText(f.status, lib.series.find((x) => x.id === id))[0])}</li>`).join('')}</ul>`,
         ok: 'Delete and replace',
         danger: true,
       });
@@ -723,6 +761,19 @@ async function viewSettings() {
               <label class="check"><input type="checkbox" data-profile="${p.id}"${chosen.has(p.id) ? ' checked' : ''} />
                 <span class="profile-name"><b>${esc(p.name)}</b><span class="hint">${p.series ? plural(p.series, 'checked series', 'checked series') : 'no checked series'}</span>
                 ${p.ready ? `<span class="ready">${icon('check')} Ready</span>` : formatsOk && (p.series || chosen.has(p.id)) ? '<span class="not-ready">Needs applying</span>' : ''}</span></label>
+              <div class="profile-rule">
+                <select class="select" data-rule-mode="${p.id}" title="What this profile's series should have">
+                  <option value="dual"${p.mode === 'dual' ? ' selected' : ''}>Dual audio (original + English)</option>
+                  <option value="original"${p.mode === 'original' ? ' selected' : ''}>Original language only</option>
+                </select>
+                <select class="select" data-rule-lang="${p.id}" title="The series' original language">
+                  ${Object.entries(LANG_NAMES)
+                    .filter(([c]) => c !== 'und')
+                    .map(([c, n]) => `<option value="${c}"${p.lang === c ? ' selected' : ''}>${n}</option>`)
+                    .join('')}
+                  <option value="auto"${p.lang === 'auto' ? ' selected' : ''}>Each series’ own (from Sonarr)</option>
+                </select>
+              </div>
               ${p.dual !== null ? `<div class="profile-scores">Dual audio ${p.dual} · dub only ${p.dub ?? 0} · best other format ${p.top} · upgrade until ${p.cutoffFormatScore} · minimum ${p.minFormatScore}${p.upgradeAllowed ? '' : ' · upgrades off'}</div>` : ''}
               ${formatsOk && p.problems.length && (p.series || chosen.has(p.id)) ? `<ul>${p.problems.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
             </div>`,
@@ -731,11 +782,11 @@ async function viewSettings() {
       </div>
       <div class="row">
         <div class="field" style="max-width:220px"><label for="dual-score">Dual audio score</label><input class="input" id="dual-score" type="number" min="1" value="${esc(s.dualScore)}" /></div>
-        <span class="hint">Must beat every other custom format in the profile, so a dual audio release always wins. Dub-only releases get −10000.</span>
+        <span class="hint">Must beat every other custom format in the profile, so a dual audio release always wins. Dub-only releases get −10000 — and so does dual audio in an “original language only” profile.</span>
       </div>
       <div class="row" style="flex:none">
         <button type="button" class="btn btn-primary btn-sm" id="setup-apply" style="flex:none">Apply to Sonarr</button>
-        <span class="hint">Creates or updates both formats, sets their scores, turns upgrades on and sets “upgrade until” so subbed files keep upgrading until dual audio arrives. Other settings in the profile are left alone.</span>
+        <span class="hint">Creates or updates both formats and sets their scores. Dual audio profiles also get upgrades on and “upgrade until” raised, so subbed files keep upgrading until dual audio arrives. Other settings in the profile are left alone. Changing a profile’s mode or language rescans the library.</span>
       </div>`;
   };
   if (sonarrConnected()) {
@@ -963,10 +1014,18 @@ async function viewSettings() {
       b.disabled = true;
       b.textContent = 'Applying…';
       try {
-        const r = await api('/api/setup', { method: 'POST', body: { profileIds, dualScore: Number(form.querySelector('#dual-score').value) } });
-        toast(`Applied to ${r.summary.profiles.join(', ')}${r.summary.warnings.length ? ` — ${r.summary.warnings.join('; ')}` : ''}`, r.status !== 'ok');
+        // Every listed profile's rule is sent: it decides its series' verdicts even when its scores aren't applied.
+        const profileRules = Object.fromEntries(
+          [...form.querySelectorAll('[data-rule-mode]')].map((sel) => [
+            sel.dataset.ruleMode,
+            { mode: sel.value, lang: form.querySelector(`[data-rule-lang="${sel.dataset.ruleMode}"]`).value },
+          ]),
+        );
+        const r = await api('/api/setup', { method: 'POST', body: { profileIds, profileRules, dualScore: Number(form.querySelector('#dual-score').value) } });
+        toast(`Applied to ${r.summary.profiles.join(', ')}${r.summary.warnings.length ? ` — ${r.summary.warnings.join('; ')}` : ''}${r.rescanning ? ' — rescanning with the new rules' : ''}`, r.status !== 'ok');
+        if (r.rescanning) watchJob();
         await loadSettings();
-        Object.assign(s, { profileIds: state.settings.profileIds, dualScore: state.settings.dualScore });
+        Object.assign(s, { profileIds: state.settings.profileIds, dualScore: state.settings.dualScore, profileRules: state.settings.profileRules });
         renderSetup(r);
       } catch (err) {
         toast(err.message, true);

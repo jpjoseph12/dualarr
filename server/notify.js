@@ -1,4 +1,5 @@
 import { log } from './config.js';
+import { langName } from './rules.js';
 
 // Notification targets. Each is { id, type, name, enabled, ...fields }; the secret fields are
 // masked when sent to the browser (see SECRET_FIELDS).
@@ -41,13 +42,23 @@ export function message(evt) {
   if (evt.kind === 'error') return { title: 'Dualarr: scan failed', text: evt.error, color: COLOR.error };
   if (evt.kind === 'upgraded') {
     const files = evt.series.reduce((n, s) => n + s.files, 0);
+    // Original-only series are "upgraded" to their original language with subtitles, not dual audio.
+    const original = evt.series.every((s) => s.mode === 'original');
+    const langs = new Set(evt.series.map((s) => s.lang || 'ja'));
+    const what = !original ? 'Dual audio' : langs.size === 1 ? `${langName([...langs][0])} audio` : 'Original audio';
+    const mixed = !original && evt.series.some((s) => s.mode === 'original');
     return {
-      title: `Dual audio: ${plural(files, 'file')} upgraded`,
-      text: clip(evt.series.map((s) => `${s.title} (${plural(s.files, 'file')})`)),
+      title: `${what}: ${plural(files, 'file')} upgraded`,
+      text: clip(evt.series.map((s) => `${s.title} (${plural(s.files, 'file')}${mixed && s.mode === 'original' ? `, ${langName(s.lang || 'ja')} only` : ''})`)),
       color: COLOR.upgraded,
     };
   }
-  const why = (s) => [s.noJapanese && `${s.noJapanese} without Japanese audio`, s.noSubs && `${s.noSubs} without subtitles`].filter(Boolean).join(', ');
+  const why = (s) => {
+    const lang = langName(s.lang || 'ja');
+    return [s.noJapanese && `${s.noJapanese} without ${lang} audio`, s.noSubs && `${s.noSubs} without subtitles`, s.dualAudio && `${s.dualAudio} with dual audio (${lang} only)`]
+      .filter(Boolean)
+      .join(', ');
+  };
   return {
     title: `Dualarr: ${plural(evt.series.length, 'series')} need${evt.series.length === 1 ? 's' : ''} attention`,
     text: clip(evt.series.map((s) => `${s.title}: ${why(s)}`)),

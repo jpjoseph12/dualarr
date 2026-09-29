@@ -19,10 +19,12 @@ Dualarr is a companion to Sonarr, and a sibling of [Courarr](https://github.com/
    - **No subtitles**: Japanese audio but no (matching) subtitle track. "HardSub" in the file or release name counts as subtitled.
    - **No Japanese audio**: for example an English-only dub
    - **Unknown**: Sonarr has no media info, or the tracks aren't tagged with a language
+
+   Japanese is the default original language. Per quality profile you can choose another language, or **original language only** instead of dual audio: see [Dual audio or original language only](#dual-audio-or-original-language-only-in-any-language).
 3. **Search and replace.**
    - **Search** asks Sonarr to look for better releases. A season where every file needs work gets one season search, which finds batch releases (where dual audio usually turns up); otherwise the monitored episodes are searched one by one.
    - The **nightly scan** also searches a few series (10 by default), least recently searched first, and waits a week before searching the same series again. A big library is worked through over a few nights without hammering your indexers.
-   - **Replace** is for files that break the rules (no Japanese audio, or no subtitles). It marks the release that produced the file as failed in Sonarr (so it is blocklisted), deletes the file and searches for the episode again.
+   - **Replace** is for files that break the rules (no audio in the original language, no subtitles, or dual audio in an original-only profile). It marks the release that produced the file as failed in Sonarr (so it is blocklisted), deletes the file and searches for the episode again.
 4. **Checking the files themselves (optional).** Language tags can be wrong. With [Check files](#check-files) on, Dualarr listens to each audio track with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads the subtitles, on the CPU or a GPU. That catches mislabelled releases, untagged tracks and signs & songs-only subtitles.
 5. **Notifications** (Discord, Telegram, ntfy, Gotify or a JSON webhook) when files are upgraded to dual audio, when new files break the rules, and when a scheduled scan can't reach Sonarr.
 
@@ -141,6 +143,17 @@ In each profile you pick, **Apply to Sonarr**:
 
 Everything else in the profile (qualities, other formats and their scores) is left alone. Applying again updates the formats in place; nothing is duplicated.
 
+## Dual audio or original language only, in any language
+
+Each quality profile in **Settings → Sonarr setup** has two choices, and every series follows the profile it uses in Sonarr:
+
+- **Mode**
+  - **Dual audio (original + English)**, the default: subbed files wait for the dub and are upgraded when it comes out.
+  - **Original language only**: original audio with subtitles is the goal. In Sonarr, Dual Audio is scored −10000 like Dub Only, so dual audio releases are never grabbed. *Upgrade Until Custom Format Score* comes back down to what your other formats can reach, and *Upgrades Allowed* is left as it is. In Dualarr, a dual audio file is a problem that can be searched for and replaced, and a subbed file is done.
+- **Original language**: **Japanese** by default. You can pick another (Chinese, Korean and more) or **Each series' own (from Sonarr)**, which uses the original language Sonarr has for the series. That suits a library with Chinese animation (donghua) next to anime: a donghua needs Chinese audio, and its Japanese dub counts as a dub.
+
+To give some series different rules, make a second quality profile in Sonarr (for example *Anime — Japanese only*) and move those series to it. Changing a profile's mode or language rescans the library.
+
 ## Rules
 
 - **Check**: series with the Anime series type (the default), or also any series whose original language is Japanese.
@@ -152,7 +165,7 @@ Changing a rule rescans the library, without sending notifications.
 ## Caveats
 
 - **Quality comes first.** Sonarr ranks quality above custom format score. A dual audio release at a lower quality than your current file (a 720p dual audio release against a 1080p subbed file, say) won't replace it. Allow the qualities you would accept for dual audio in the profile.
-- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
+- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The language pairs in the pattern are Japanese + English; for other original languages, only the generic "Dual Audio" and "Multi-Audio" names are recognised. The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
 - **Signs & songs tracks count as subtitles** unless [Check files](#check-files) is on. Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
 - **Checks are good, not perfect.** A clip with only music or silence can be misheard. That is why there are three clips and a confidence threshold, and why an unsure result keeps the tag. Text subtitle languages are recognised for English, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Japanese, Chinese and Korean. Reading subtitles means reading the whole file once, which is the slow part on spinning disks.
 - **Very high scores in other formats.** If another custom format in a profile scores more than the dual audio score, a subbed release with it could beat a dual audio one. Raise the dual audio score above it. The setup panel flags this, and also flags a profile where another format scores so high (10000 or more) that a dub-only release could still be grabbed.

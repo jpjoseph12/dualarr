@@ -33,6 +33,17 @@ describe('messages', () => {
     assert.equal(message({ kind: 'test' }).text, 'Notifications are working.');
   });
 
+  test('original-only series name their language', () => {
+    const zh = { kind: 'upgraded', series: [{ title: 'Link Click', files: 2, mode: 'original', lang: 'zh' }] };
+    assert.equal(message(zh).title, 'Chinese audio: 2 files upgraded');
+    const two = { kind: 'upgraded', series: [...zh.series, { title: 'Mushishi', files: 1, mode: 'original' }] };
+    assert.equal(message(two).title, 'Original audio: 3 files upgraded');
+    const mixed = { kind: 'upgraded', series: [...zh.series, { title: 'Frieren', files: 1, mode: 'dual' }] };
+    assert.deepEqual([message(mixed).title, message(mixed).text], ['Dual audio: 3 files upgraded', 'Link Click (2 files, Chinese only)\nFrieren (1 file)']);
+    const bad = { kind: 'problems', series: [{ title: 'Link Click', noJapanese: 1, noSubs: 0, dualAudio: 2, lang: 'zh' }] };
+    assert.equal(message(bad).text, 'Link Click: 1 without Chinese audio, 2 with dual audio (Chinese only)');
+  });
+
   test('long lists are clipped', () => {
     const series = Array.from({ length: 25 }, (_, i) => ({ title: `Show ${i}`, files: 1 }));
     const m = message({ kind: 'upgraded', series });
