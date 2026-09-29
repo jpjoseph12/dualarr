@@ -20,5 +20,8 @@
   "dependencies": {
     "croner": "^9.1.0",
     "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }

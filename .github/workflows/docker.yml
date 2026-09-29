@@ -37,7 +37,11 @@ jobs:
       - name: Check the web UI script parses
         run: npm run test:ui
 
-      # Unit + API tests against local stand-ins for Sonarr, webhooks, the model download and
+      # The UI tests drive the web app in Chromium (test/ui.test.js).
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # Unit, API and browser tests against local stand-ins for Sonarr, webhooks, the model download and
       # whisper-cli — no network or API keys needed. Fails if coverage drops below the
       # thresholds in package.json (lines 90%, branches 75%, functions 85%).
       - name: Run tests with coverage

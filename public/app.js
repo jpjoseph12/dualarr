@@ -33,6 +33,7 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => null);
   if (res.status === 401 && data?.code && !path.startsWith('/api/auth/')) {
     clearTimeout(pollTimer);
+    renderToken++; // so the view that asked doesn't cover the login with an error
     if (data.code === 'setup') viewCreateAccount();
     else viewLogin('Your session ended — please log in again.');
   }
@@ -1029,7 +1030,7 @@ async function viewActivity() {
     <div class="panel">
       ${
         runs.length
-          ? `<table class="table">
+          ? `<table class="table runs">
               <thead><tr><th style="width:160px">Started</th><th style="width:130px">What</th><th style="width:110px">Result</th><th>Details</th></tr></thead>
               <tbody>${runs.map(runRow).join('')}</tbody>
             </table>`

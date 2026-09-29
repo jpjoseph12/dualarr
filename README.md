@@ -180,7 +180,8 @@ Node 24 (22.13+ works), no build step.
 ```sh
 npm install
 npm run dev             # http://localhost:6162, settings in ./.config
-npm test                # unit and API tests against a local stand-in Sonarr (install ffmpeg to run the file-check tests)
+npm test                # unit, API and browser tests against a local stand-in Sonarr (install ffmpeg to run the file-check tests)
+npx playwright install chromium   # once, for the browser tests in test/ui.test.js (or set CHROMIUM_PATH)
 npm run test:coverage   # the same, with the coverage thresholds CI enforces
 node test/fixtures/mock-sonarr.mjs   # a stand-in Sonarr on :8989 (API key "sonarrkey") to click around with
 npm run icon            # redraw public/icon.png after changing the logo
