@@ -132,6 +132,11 @@ jobs:
           grep -q '"gpu":"${{ matrix.gpu }}"' verify.json
           grep -q '"device":"CPU"' verify.json
           docker exec dualarr /opt/whisper/whisper-cli -h 2>&1 | grep -q 'usage:'
+          # every library the backends need ships with them (only the driver's libcuda comes from
+          # the host): one missing makes whisper quietly fall back to the CPU on a real GPU
+          if docker exec dualarr sh -c 'for f in /opt/whisper/libggml-*.so; do ldd "$f"; done' | grep 'not found' | grep -v 'libcuda\.so'; then
+            exit 1
+          fi
           # runs as PUID:PGID and /config belongs to them
           docker exec dualarr sh -c 'grep "^Uid:" /proc/1/status' | grep -q $'\t1001\t'
           test "$(stat -c '%u:%g' "$RUNNER_TEMP/config/dualarr.db")" = "1001:1002"

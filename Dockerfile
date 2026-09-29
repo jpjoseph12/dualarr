@@ -32,10 +32,11 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp /src
 # GPU generations: 52 GTX 900, 61 GTX 10, 75 GTX 16 / RTX 20, 86 RTX 30, 89 RTX 40 (+ PTX, so
-# newer cards compile it on first use).
+# newer cards compile it on first use). NCCL off: it only helps with several GPUs, and the devel
+# image would link it without it being in the final image, so the CUDA backend couldn't load.
 RUN set -eux; \
     cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF \
-      -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="52-real;61-real;75-real;86-real;89" \
+      -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF -DCMAKE_CUDA_ARCHITECTURES="52-real;61-real;75-real;86-real;89" \
       -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF; \
     cmake --build /build -j"$(nproc)" --target whisper-cli; \
     mkdir /out; cp -P /build/bin/whisper-cli /build/bin/*.so* /out/; \
