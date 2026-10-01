@@ -33,6 +33,7 @@ const clip = (lines) => lines.slice(0, MAX_LINES).join('\n') + (lines.length > M
  * Builds the message for an event:
  *  { kind: 'upgraded', series: [{ title, files }] }                 subbed files replaced by dual audio
  *  { kind: 'problems', series: [{ title, noJapanese, noSubs }] }    new files breaking the rules
+ *  { kind: 'replaced', files: [{ title, file, release, blocklisted }] }   deleted, searching again
  *  { kind: 'error', error }
  *  { kind: 'test' }
  */
@@ -45,6 +46,13 @@ export function message(evt) {
       title: `Dual audio: ${plural(files, 'file')} upgraded`,
       text: clip(evt.series.map((s) => `${s.title} (${plural(s.files, 'file')})`)),
       color: COLOR.upgraded,
+    };
+  }
+  if (evt.kind === 'replaced') {
+    return {
+      title: `Dualarr: replaced ${plural(evt.files.length, 'file')} without Japanese audio`,
+      text: clip(evt.files.map((f) => `${f.title}: ${f.file.split('/').pop()}${f.blocklisted ? ` (${f.release} blocklisted)` : ''}`)),
+      color: COLOR.problems,
     };
   }
   const why = (s) => [s.noJapanese && `${s.noJapanese} without Japanese audio`, s.noSubs && `${s.noSubs} without subtitles`].filter(Boolean).join(', ');

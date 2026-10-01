@@ -38,6 +38,15 @@ db.exec(`
     checked_at TEXT NOT NULL
   );
 
+  -- How often each episode was replaced automatically, so a series with no Japanese release
+  -- isn't deleted and downloaded forever.
+  CREATE TABLE IF NOT EXISTS auto_replaced (
+    episode_id INTEGER PRIMARY KEY,
+    series_id  INTEGER NOT NULL,
+    count      INTEGER NOT NULL,
+    last_at    TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     trigger     TEXT NOT NULL,
@@ -77,6 +86,9 @@ export const SETTING_DEFAULTS = {
   verifyPerRun: 100,
   // Sonarr's folder -> the same folder in this container: [{ from, to }].
   pathMappings: [],
+  // Delete and download again, unattended, the checked files that have no Japanese audio.
+  autoReplace: false,
+  autoReplacePerRun: 10,
   authUser: '',
   authHash: '',
   apiKey: '',
@@ -122,8 +134,31 @@ export function pruneSeries(keepIds) {
   const keep = new Set(keepIds);
   const del = db.prepare('DELETE FROM series WHERE id = ?');
   for (const { id } of db.prepare('SELECT id FROM series').all()) if (!keep.has(id)) del.run(id);
-  const delChecks = db.prepare('DELETE FROM checks WHERE series_id = ?');
-  for (const { series_id: id } of db.prepare('SELECT DISTINCT series_id FROM checks').all()) if (!keep.has(id)) delChecks.run(id);
+  for (const table of ['checks', 'auto_replaced']) {
+    const delRows = db.prepare(`DELETE FROM ${table} WHERE series_id = ?`);
+    for (const { series_id: id } of db.prepare(`SELECT DISTINCT series_id FROM ${table}`).all()) if (!keep.has(id)) delRows.run(id);
+  }
+}
+
+// ---------- automatic replacements ----------
+
+/** How often each of these episodes was replaced automatically. */
+export const autoReplaceCounts = (episodeIds) =>
+  new Map(
+    episodeIds.length
+      ? db
+          .prepare(`SELECT episode_id, count FROM auto_replaced WHERE episode_id IN (${episodeIds.map(() => '?').join(',')})`)
+          .all(...episodeIds)
+          .map((r) => [r.episode_id, r.count])
+      : [],
+  );
+
+export function noteAutoReplaced(seriesId, episodeIds) {
+  const stmt = db.prepare(
+    `INSERT INTO auto_replaced (episode_id, series_id, count, last_at) VALUES (?, ?, 1, ?)
+     ON CONFLICT(episode_id) DO UPDATE SET count = count + 1, last_at = excluded.last_at`,
+  );
+  for (const id of episodeIds) stmt.run(id, seriesId, now());
 }
 
 // ---------- file checks ----------

@@ -31,6 +31,11 @@ describe('messages', () => {
     assert.equal(message({ kind: 'problems', series: [problems.series[0]] }).title, 'Dualarr: 1 series needs attention');
     assert.deepEqual(message({ kind: 'error', error: 'boom' }), { title: 'Dualarr: scan failed', text: 'boom', color: 0xf87171 });
     assert.equal(message({ kind: 'test' }).text, 'Notifications are working.');
+    assert.deepEqual(message({ kind: 'replaced', files: [{ title: 'Dandadan', file: 'Dandadan/Season 1/E02.mkv', release: 'Dandadan.E02.Dub', blocklisted: true }, { title: 'Frieren', file: 'F/E01.mkv', release: null, blocklisted: false }] }), {
+      title: 'Dualarr: replaced 2 files without Japanese audio',
+      text: 'Dandadan: E02.mkv (Dandadan.E02.Dub blocklisted)\nFrieren: E01.mkv',
+      color: 0xfbbf24,
+    });
   });
 
   test('long lists are clipped', () => {

@@ -23,7 +23,7 @@ Dualarr is a companion to Sonarr, and a sibling of [Courarr](https://github.com/
    - **Search** asks Sonarr to look for better releases. A season where every file needs work gets one season search, which finds batch releases (where dual audio usually turns up); otherwise the monitored episodes are searched one by one.
    - The **nightly scan** also searches a few series (10 by default), least recently searched first, and waits a week before searching the same series again. A big library is worked through over a few nights without hammering your indexers.
    - **Replace** is for files that break the rules (no Japanese audio, or no subtitles). It marks the release that produced the file as failed in Sonarr (so it is blocklisted), deletes the file and searches for the episode again.
-4. **Checking the files themselves (optional).** Language tags can be wrong. With [Check files](#check-files) on, Dualarr listens to each audio track with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads the subtitles, on the CPU or a GPU. That catches mislabelled releases, untagged tracks and signs & songs-only subtitles.
+4. **Checking the files themselves (optional).** Language tags can be wrong. With [Check files](#check-files) on, Dualarr listens to each audio track with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads the subtitles, on the CPU or a GPU. That catches mislabelled releases, untagged tracks and signs & songs-only subtitles. Files it's sure have no Japanese audio can be [replaced automatically](#replacing-files-without-japanese-audio-automatically).
 5. **Notifications** (Discord, Telegram, ntfy, Gotify or a JSON webhook) when files are upgraded to dual audio, when new files break the rules, and when a scheduled scan can't reach Sonarr.
 
 ## Before you start: turn on "Analyse video files" in Sonarr
@@ -101,6 +101,18 @@ Each file is checked once, and again only if it changes. The nightly scan checks
 
 ![Check files](docs/screenshots/check-files.png)
 
+### Replacing files without Japanese audio automatically
+
+With **Replace files without Japanese audio automatically** on (under Check files), a file that a check is *sure* has no Japanese audio gets the Replace treatment without you: Dualarr marks the release that produced it as failed in Sonarr (so it's blocklisted), deletes the file and asks Sonarr to search for the episode again. It runs after the checks in the scheduled scan and in **Check files** runs. Because it deletes files unattended, it only acts when all of these hold:
+
+- **The check is sure.** Every audio track was heard as a language other than Japanese, with at least 80% confidence. A file whose tags merely say "English" is never deleted on that alone.
+- **You expect Japanese.** The series is monitored in Sonarr and its original language is Japanese, so a western cartoon typed as anime is left alone. The episode is monitored.
+- **Sonarr will look for a Japanese release.** The series' quality profile has the [Sonarr setup](#how-the-custom-formats-work) applied, so dub-only releases are refused and Sonarr doesn't just grab another dub. Otherwise the file is listed in Activity as not replaced, with the reason.
+- **It doesn't loop.** An episode is replaced at most twice. If the third download still has no Japanese audio, there probably isn't a Japanese release to be had, and Dualarr leaves it to you.
+- **It doesn't run away.** At most 10 files a run (**Replacements per run**); the rest wait for the next run.
+
+The file is deleted before a replacement is found, as with the Replace button, so an episode can be missing until Sonarr finds a release. Replacements show in Activity and, with **New problems** notifications on, in a notification.
+
 ### Setting it up
 
 1. **Give Dualarr your anime, read-only.** On Unraid, fill in **Media** in the template. With Compose, add a volume. The easiest setup uses the same container path Sonarr uses (if Sonarr sees `/tv/anime`, mount the same host folder at `/tv` in Dualarr too). Otherwise add a **path mapping** in Settings, such as Sonarr's `/tv/anime` → `/media/anime`. Settings shows whether each of Sonarr's root folders is visible.
@@ -154,6 +166,7 @@ Changing a rule rescans the library, without sending notifications.
 - **Quality comes first.** Sonarr ranks quality above custom format score. A dual audio release at a lower quality than your current file (a 720p dual audio release against a 1080p subbed file, say) won't replace it. Allow the qualities you would accept for dual audio in the profile.
 - **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
 - **Signs & songs tracks count as subtitles** unless [Check files](#check-files) is on. Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
+- **Automatic replacement deletes first.** The episode is missing until Sonarr finds a Japanese release, which can take a while for older or obscure shows. Sonarr's own **Redownload Failed** setting doesn't matter here: Dualarr asks for the search itself.
 - **Checks are good, not perfect.** A clip with only music or silence can be misheard. That is why there are three clips and a confidence threshold, and why an unsure result keeps the tag. Text subtitle languages are recognised for English, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Japanese, Chinese and Korean. Reading subtitles means reading the whole file once, which is the slow part on spinning disks.
 - **Very high scores in other formats.** If another custom format in a profile scores more than the dual audio score, a subbed release with it could beat a dual audio one. Raise the dual audio score above it. The setup panel flags this, and also flags a profile where another format scores so high (10000 or more) that a dub-only release could still be grabbed.
 - **Unknown files are skipped.** Files without media info are never searched or replaced. See [Analyse video files](#before-you-start-turn-on-analyse-video-files-in-sonarr).

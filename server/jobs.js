@@ -93,7 +93,9 @@ export async function scanLibrary(client, settings, summary, { verify: withVerif
   const prev = new Map(store.listSeries().map((s) => [s.id, s]));
   const { wanted, fetched } = await fetchSeries(client, settings, summary);
   if (withVerify) await verifyDue(fetched, settings, summary);
-  const rows = fetched.map(({ s, files }) => saveVerdicts(s, files, settings));
+  let rows = fetched.map(({ s, files }) => saveVerdicts(s, files, settings));
+  // Before the comparison with the last scan, so a file replaced right away isn't also news.
+  if (withVerify && settings.autoReplace) rows = await autoReplace(client, settings, summary, rows);
   // A series Sonarr couldn't read this time keeps its last scan.
   const read = new Set(rows.map((r) => r.id));
   const kept = wanted.filter((s) => !read.has(s.id) && prev.has(s.id)).map((s) => prev.get(s.id));
@@ -110,6 +112,7 @@ async function notifyChanges(settings, changes, summary) {
   const events = [];
   if (settings.notifyUpgrades && changes.upgraded.length) events.push({ kind: 'upgraded', series: changes.upgraded });
   if (settings.notifyProblems && changes.problems.length) events.push({ kind: 'problems', series: changes.problems });
+  if (settings.notifyProblems && summary.autoReplaced?.files.length) events.push({ kind: 'replaced', files: summary.autoReplaced.files });
   const enabled = (settings.notifiers || []).filter((n) => n.enabled !== false).length;
   let sent = 0;
   for (const evt of events) {
@@ -224,7 +227,8 @@ export function verifyJob({ seriesIds = null, force = false } = {}) {
     const due = dueForVerify(fetched, settings, { force, limit: seriesIds ? Infinity : settings.verifyPerRun });
     if (!due.length) throw new Error('Every file has been checked already');
     await verifyFiles(due, settings, summary);
-    const rows = fetched.map(({ s, files }) => saveVerdicts(s, files, settings));
+    let rows = fetched.map(({ s, files }) => saveVerdicts(s, files, settings));
+    if (settings.autoReplace) rows = await autoReplace(client, settings, summary, rows);
     const changes = rules.diffScans(prev, rows);
     Object.assign(summary, { upgraded: changes.upgraded, problems: changes.problems });
     await notifyChanges(settings, changes, summary);
@@ -317,39 +321,110 @@ async function rescan(client, settings, id) {
 /**
  * Replaces files that break the rules (no Japanese audio / no subtitles): blocklists the release
  * that produced each one (when Sonarr's history says which), deletes the file, and searches for
- * the episodes again. Files that are fine by now are left alone.
+ * the episodes again. Files that are fine by now are left alone. Resolves null when none are left,
+ * else { row (rescanned), files: [{ id, file, release, blocklisted }], episodeIds }.
  */
+async function replaceFiles(client, settings, seriesId, fileIds, summary) {
+  const [files, episodes, history] = await Promise.all([
+    client.episodeFiles(seriesId),
+    client.episodes(seriesId),
+    client.seriesHistory(seriesId).catch(() => []),
+  ]);
+  const opts = ruleOptions(settings);
+  // Judged like the Library shows them: with what checking the file found.
+  const checks = store.getChecks(seriesId);
+  const targets = files.filter((f) => fileIds.includes(f.id) && rules.REPLACEABLE.includes(rules.classifyFile(f, opts, checks.get(f.id)).status));
+  if (!targets.length) return null;
+  const done = [];
+  for (const f of targets) {
+    const grab = rules.grabFor(history, f);
+    let blocklisted = false;
+    if (grab) {
+      try {
+        await client.markFailed(grab.id);
+        blocklisted = true;
+      } catch (e) {
+        summary.warnings.push(`Could not blocklist ${grab.sourceTitle}: ${e.message}`);
+      }
+    }
+    await client.deleteEpisodeFile(f.id);
+    done.push({ id: f.id, file: f.relativePath, release: grab?.sourceTitle || f.sceneName || null, blocklisted });
+  }
+  const replacedIds = new Set(targets.map((f) => f.id));
+  const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
+  if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
+  const row = await rescan(client, settings, seriesId);
+  log(`Replaced ${targets.length} file(s) of ${row.title} (${done.filter((d) => d.blocklisted).length} blocklisted)`);
+  return { row, files: done, episodeIds };
+}
+
+/** The Replace buttons. */
 export function replaceJob(seriesId, fileIds) {
   return job('replace', async (summary, client, settings) => {
-    const [files, episodes, history] = await Promise.all([
-      client.episodeFiles(seriesId),
-      client.episodes(seriesId),
-      client.seriesHistory(seriesId).catch(() => []),
-    ]);
-    const opts = ruleOptions(settings);
-    const targets = files.filter((f) => fileIds.includes(f.id) && rules.REPLACEABLE.includes(rules.classifyFile(f, opts).status));
-    if (!targets.length) throw new Error('None of those files break the rules any more — scan again');
-    let blocklisted = 0;
-    for (const f of targets) {
-      const grab = rules.grabFor(history, f);
-      if (grab) {
-        try {
-          await client.markFailed(grab.id);
-          blocklisted++;
-        } catch (e) {
-          summary.warnings.push(`Could not blocklist ${grab.sourceTitle}: ${e.message}`);
-        }
-      }
-      await client.deleteEpisodeFile(f.id);
-    }
-    const replacedIds = new Set(targets.map((f) => f.id));
-    const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
-    if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
-    const row = await rescan(client, settings, seriesId);
-    summary.replaced = { title: row.title, files: targets.length, blocklisted, episodes: episodeIds.length };
-    log(`Replaced ${targets.length} file(s) of ${row.title} (${blocklisted} blocklisted)`);
-    return row;
+    const r = await replaceFiles(client, settings, seriesId, fileIds, summary);
+    if (!r) throw new Error('None of those files break the rules any more — scan again');
+    summary.replaced = { title: r.row.title, files: r.files.length, blocklisted: r.files.filter((f) => f.blocklisted).length, episodes: r.episodeIds.length };
+    return r.row;
   });
+}
+
+/**
+ * Replaces, unattended, checked files that surely have no Japanese audio, but only where Japanese
+ * is expected and a Japanese replacement is likely: monitored series originally in Japanese,
+ * monitored episodes, and a quality profile with Dualarr's formats applied (so Sonarr doesn't grab
+ * another dub). At most `autoReplacePerRun` files a run, and MAX_AUTO_REPLACES times per episode.
+ * Returns `rows` with the replaced series rescanned.
+ */
+async function autoReplace(client, settings, summary, rows) {
+  const candidates = [];
+  for (const row of rows) {
+    if (!row.monitored || !rules.expectsJapanese(row)) continue;
+    const checks = store.getChecks(row.id);
+    for (const f of row.files) {
+      if (f.status === 'noJapanese' && f.verified && rules.surelyNotJapanese(checks.get(f.id))) candidates.push({ row, f });
+    }
+  }
+  if (!candidates.length) return rows;
+  const out = { files: [], skipped: [], later: 0 };
+  summary.autoReplaced = out;
+  const skip = (row, f, why) => out.skipped.length < 50 && out.skipped.push({ title: row.title, file: f.path, why });
+  const ids = await formatIds(client);
+  const ready = new Set((await client.qualityProfiles()).filter((p) => rules.profileState(p, ids).ready).map((p) => p.id));
+  const updated = new Map();
+  let budget = settings.autoReplacePerRun;
+  for (const list of Map.groupBy(candidates, (c) => c.row.id).values()) {
+    const { row } = list[0];
+    if (!ready.has(row.qualityProfileId)) {
+      for (const { f } of list) skip(row, f, 'apply the Sonarr setup to its quality profile first, or Sonarr could grab another dub');
+      continue;
+    }
+    const episodes = await client.episodes(row.id);
+    const counts = store.autoReplaceCounts(episodes.map((e) => e.id));
+    const picked = [];
+    for (const { f } of list) {
+      const eps = episodes.filter((e) => e.episodeFileId === f.id);
+      if (!eps.some((e) => e.monitored !== false)) skip(row, f, 'its episode isn’t monitored');
+      else if (eps.some((e) => (counts.get(e.id) || 0) >= rules.MAX_AUTO_REPLACES)) skip(row, f, `replaced ${rules.MAX_AUTO_REPLACES} times already and still no Japanese audio — replace it by hand`);
+      else if (budget <= 0) out.later++;
+      else {
+        budget--;
+        picked.push({ f, eps });
+      }
+    }
+    if (!picked.length) continue;
+    try {
+      const r = await replaceFiles(client, settings, row.id, picked.map((p) => p.f.id), summary);
+      if (!r) continue;
+      const replaced = new Set(r.files.map((x) => x.id));
+      store.noteAutoReplaced(row.id, picked.filter((p) => replaced.has(p.f.id)).flatMap((p) => p.eps.map((e) => e.id)));
+      out.files.push(...r.files.map(({ id, ...x }) => ({ title: row.title, ...x })));
+      updated.set(row.id, r.row);
+    } catch (e) {
+      summary.warnings.push(`Replacing files of ${row.title}: ${e.message}`);
+    }
+  }
+  if (out.later) summary.warnings.push(`${out.later} more file(s) without Japanese audio will be replaced in the next runs (at most ${settings.autoReplacePerRun} a run)`);
+  return rows.map((r) => updated.get(r.id) || r);
 }
 
 // ---------- custom formats ----------

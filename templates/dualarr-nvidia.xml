@@ -22,8 +22,12 @@
   <Screenshot>https://raw.githubusercontent.com/jpjoseph12/dualarr/main/docs/screenshots/settings.png</Screenshot>
   <License>MIT</License>
   <MinVer>6.12.0</MinVer>
-  <Date>2026-09-28</Date>
+  <Date>2026-10-01</Date>
   <Changes>
+### 0.3.0 (2026-10-01)
+- Replace automatically (optional): when a check is sure a file has no Japanese audio, Dualarr blocklists the release, deletes the file and has Sonarr download it again. Only where Japanese is expected (monitored, originally Japanese series) and once the Sonarr setup is applied; at most twice per episode.
+- The Replace button now goes by what checking a file found, not just its tags.
+
 ### 0.2.0 (2026-09-28)
 - Check files: whisper.cpp listens to each audio track and the subtitles are read, instead of trusting the language tags. Catches mislabelled releases, untagged tracks and signs &amp; songs-only subtitles.
 - Runs on the CPU, an Intel or AMD iGPU (/dev/dri), or an NVIDIA GPU (the new Dualarr-NVIDIA template).

@@ -114,6 +114,22 @@ describe('checked files', () => {
     assert.deepEqual(rules.classifyFile(file, {}, { size: 1, error: 'old' }).notes, []);
   });
 
+  test('surelyNotJapanese: every track, sure enough, not Japanese', () => {
+    const a = (lang, p) => ({ track: 1, tag: 'ja', lang, p });
+    assert.equal(rules.surelyNotJapanese({ audio: [a('en', 0.95)] }), true);
+    assert.equal(rules.surelyNotJapanese({ audio: [a('en', 0.95), a('es', 0.9)] }), true);
+    assert.equal(rules.surelyNotJapanese({ audio: [a('en', 0.95), a('ja', 0.9)] }), false);
+    assert.equal(rules.surelyNotJapanese({ audio: [a('en', 0.7)] }), false, 'enough for a verdict, not for deleting');
+    assert.equal(rules.surelyNotJapanese({ audio: [a(null, 0)] }), false);
+    assert.equal(rules.surelyNotJapanese({ audio: [] }), false);
+    assert.equal(rules.surelyNotJapanese({ error: 'x', audio: [a('en', 1)] }), false);
+    assert.equal(rules.surelyNotJapanese(undefined), false);
+    assert.equal(rules.expectsJapanese({ originalLanguage: 'Japanese' }), true);
+    assert.equal(rules.expectsJapanese({ originalLanguage: 'English' }), false);
+    assert.equal(rules.expectsJapanese({}), false);
+    assert.equal(rules.summariseSeries({ id: 1, title: 'x', originalLanguage: { name: 'Japanese' } }, [], {}).originalLanguage, 'Japanese');
+  });
+
   test('summaries and totals count checked files', () => {
     const row = rules.summariseSeries({ id: 1, title: 'x' }, [file, { ...file, id: 2 }], {}, new Map([[1, check([{ track: 1, tag: 'ja', lang: 'ja', p: 1 }])]]));
     assert.equal(row.verified, 1);

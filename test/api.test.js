@@ -409,12 +409,14 @@ describe('checking files', () => {
       verifyModel: 'tiny',
       verifyDevice: 'gpu:1',
       verifyPerRun: 0,
+      autoReplace: 'yes',
+      autoReplacePerRun: 1000,
       pathMappings: [{ from: ' /anime ', to: `${MEDIA} ` }, { from: '', to: '' }, { from: 'D:\\Anime', to: '/win' }],
     });
-    assert.deepEqual([s.verify, s.verifyModel, s.verifyDevice, s.verifyPerRun], [true, 'tiny', 'gpu:1', 1]);
+    assert.deepEqual([s.verify, s.verifyModel, s.verifyDevice, s.verifyPerRun, s.autoReplace, s.autoReplacePerRun], [true, 'tiny', 'gpu:1', 1, true, 100]);
     assert.deepEqual(s.pathMappings, [{ from: '/anime', to: MEDIA }, { from: 'D:\\Anime', to: '/win' }]);
     assert.equal(s.rescanning, false, 'checking settings don’t rescan');
-    await ok('PUT', '/api/settings', { verifyDevice: 'auto', verifyPerRun: 100, pathMappings: [{ from: '/anime', to: MEDIA }] });
+    await ok('PUT', '/api/settings', { verifyDevice: 'auto', verifyPerRun: 100, autoReplace: false, pathMappings: [{ from: '/anime', to: MEDIA }] });
   });
 
   test('status: tools, GPUs, the model, and which Sonarr folders are visible', async () => {

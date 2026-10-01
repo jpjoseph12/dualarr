@@ -126,6 +126,8 @@ function sanitizeSettings(b, saved) {
   }
   if (b.notifiers !== undefined) patch.notifiers = sanitizeNotifiers(b.notifiers, saved.notifiers);
   if (b.verify !== undefined) patch.verify = !!b.verify;
+  if (b.autoReplace !== undefined) patch.autoReplace = !!b.autoReplace;
+  if (b.autoReplacePerRun !== undefined) patch.autoReplacePerRun = clampInt(b.autoReplacePerRun, 1, 100, saved.autoReplacePerRun);
   if (b.verifyModel !== undefined) {
     if (!verify.MODELS[b.verifyModel]) throw bad(`Unknown model "${b.verifyModel}"`);
     patch.verifyModel = b.verifyModel;

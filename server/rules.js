@@ -59,6 +59,19 @@ const langName = (code) => LANG_NAMES[code] || code;
 
 /** Below this (averaged over the clips), a detected audio language is a guess and the tag wins. */
 export const AUDIO_MIN_P = 0.5;
+/** Deleting a file unattended needs more certainty: every track this sure it isn't Japanese. */
+export const AUTO_REPLACE_MIN_P = 0.8;
+/** Replacing the same episode more often than this means no Japanese release is to be had. */
+export const MAX_AUTO_REPLACES = 2;
+
+/** Whether a check is sure enough that no audio track is Japanese to delete the file unattended. */
+export function surelyNotJapanese(check) {
+  const audio = check && !check.error ? check.audio || [] : [];
+  return audio.length > 0 && audio.every((a) => a.lang && a.lang !== 'ja' && a.p >= AUTO_REPLACE_MIN_P);
+}
+
+/** Series whose original language is Japanese: the ones a Japanese track is expected for. */
+export const expectsJapanese = (row) => /^japanese$/i.test(row.originalLanguage || '');
 
 /**
  * The languages a file really has, once it has been checked: detected audio languages replace
@@ -154,6 +167,7 @@ export function summariseSeries(s, files, opts, checks = new Map()) {
     poster: s.images?.find((i) => i.coverType === 'poster')?.remoteUrl || null,
     monitored: s.monitored !== false,
     seriesType: s.seriesType,
+    originalLanguage: s.originalLanguage?.name || null,
     qualityProfileId: s.qualityProfileId,
     counts,
     total: classified.length,

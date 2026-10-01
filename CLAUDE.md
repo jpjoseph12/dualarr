@@ -49,6 +49,13 @@ Instead of trusting Sonarr's language tags, Dualarr can listen to the audio and 
 - Tests use real ffmpeg (CI installs it) with `test/fixtures/fake-whisper.mjs`, which "hears" a clip's language from its tone (440 Hz Japanese, 880 Hz English; `FAKE_GPU` pretends a Vulkan GPU), and `test/fixtures/media.mjs` to make episodes. Tests needing ffmpeg skip without it.
 - Verified during development: the CPU and Vulkan builds of whisper.cpp v1.9.4 on Ubuntu 24.04 (device logs, `-dev`/`-ng`, multi-file `-dl` output), run against real test episodes. **Not verified here** (no Docker daemon, GPU, or Hugging Face access in the dev sandbox): the Docker builds themselves, CUDA, real GPUs, and language accuracy with a real model. CI's smoke job is the first real run of the images.
 
+### Replace automatically (0.3.0)
+
+- Setting `autoReplace` (off by default) + `autoReplacePerRun` (10). `jobs.autoReplace()` runs in the scheduled scan (with Check files on) and in `verifyJob`, **after** the verdicts are saved and **before** `diffScans`, so a file replaced at once isn't also announced as a new problem. It sends a `replaced` notification (under `notifyProblems`).
+- Candidates: `status === 'noJapanese'`, verified, and `rules.surelyNotJapanese(check)` (every audio track detected as non-Japanese with p ≥ `AUTO_REPLACE_MIN_P` = 0.8). Guards: monitored series with `originalLanguage` Japanese (`rules.expectsJapanese`; `summariseSeries` now stores `originalLanguage`), a monitored episode, the series' quality profile `profileState(...).ready`, at most `MAX_AUTO_REPLACES` (2) per episode (table `auto_replaced`), and the per-run cap. Skipped files are listed with a reason in `summary.autoReplaced.skipped`.
+- `replaceFiles()` is shared with the Replace button and now classifies with the stored checks (before, a file the check had found to be English but tagged Japanese was refused).
+- `sonarr.js` retries a GET once after a dropped kept-alive connection (`ECONNRESET`), which showed up in tests and happens behind proxies.
+
 ## Ideas for later
 
 - Unticking a profile in the setup panel leaves Dualarr's scores in it; `setupJob` could reset the scores of profiles that are no longer chosen.

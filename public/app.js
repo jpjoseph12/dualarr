@@ -605,6 +605,12 @@ async function viewSettings() {
           <div class="panel-body">
             <label class="check"><input type="checkbox" name="verify"${s.verify ? ' checked' : ''} />
               <span><b>Check files</b><span class="hint">Each file is checked once (and again if it changes), during the scheduled scan — new files first — or with “Check files now” in the Library. ffmpeg cuts three 30-second clips from the middle of every audio track and whisper.cpp says which language is spoken.</span></span></label>
+            <label class="check"><input type="checkbox" name="autoReplace"${s.autoReplace ? ' checked' : ''} />
+              <span><b>Replace files without Japanese audio automatically</b><span class="hint">When a check is sure (80% or more, on every audio track) that a file has no Japanese audio, Dualarr does what the Replace button does: blocklists the release, deletes the file and has Sonarr search again. Only for monitored episodes of monitored series whose original language is Japanese, and only once the series’ quality profile has the Sonarr setup applied, so Sonarr doesn’t just grab another dub. An episode is replaced at most twice. The file is deleted before a replacement is found.</span></span></label>
+            <div class="field" style="max-width:260px">
+              <label for="auto-per-run">Replacements per run, at most</label>
+              <input class="input" id="auto-per-run" name="autoReplacePerRun" type="number" min="1" max="100" value="${esc(s.autoReplacePerRun)}" />
+            </div>
             <div id="verify-status">${loadingBlock('Looking for ffmpeg, whisper.cpp and GPUs…')}</div>
             <div class="row wrap">
               <div class="field">
@@ -875,6 +881,8 @@ async function viewSettings() {
       notifyProblems: fd.get('notifyProblems') === 'on',
       notifiers: readNotifiers(),
       verify: fd.get('verify') === 'on',
+      autoReplace: fd.get('autoReplace') === 'on',
+      autoReplacePerRun: Number(fd.get('autoReplacePerRun')),
       verifyDevice: fd.get('verifyDevice'),
       verifyModel: fd.get('verifyModel'),
       verifyPerRun: Number(fd.get('verifyPerRun')),
@@ -1059,6 +1067,10 @@ function runRow(r) {
     for (const m of v.mismatches.slice(0, 10)) lines.push(`<span style="color:var(--warn)">${esc(m.title)} — ${esc(m.file.split('/').pop())}: ${esc(m.notes.join('; '))}</span>`);
     if (v.mismatches.length > 10) lines.push(`<span class="faint">…and ${v.mismatches.length - 10} more files that disagree with their tags</span>`);
   }
+  for (const f of s.autoReplaced?.files || []) {
+    lines.push(`<span style="color:var(--ok)">Replaced ${esc(f.title)} — ${esc(f.file.split('/').pop())}: no Japanese audio${f.blocklisted ? ` (${esc(f.release)} blocklisted)` : ''}. Sonarr is searching again.</span>`);
+  }
+  for (const f of (s.autoReplaced?.skipped || []).slice(0, 10)) lines.push(`<span class="faint">Not replaced: ${esc(f.title)} — ${esc(f.file.split('/').pop())}: ${esc(f.why)}</span>`);
   if (s.tested) lines.push(`<span>Tested on ${esc(s.tested.title)} — ${esc(s.tested.file.split('/').pop())}: ${s.tested.seconds}s on ${esc(s.tested.device)}</span>`);
   if (s.searched?.length) lines.push(`<span>Searched: ${esc(titles(s.searched, (x) => x.title))}</span>`);
   else if (s.searched && r.trigger === 'schedule') lines.push('<span class="faint">Nothing due for a search</span>');

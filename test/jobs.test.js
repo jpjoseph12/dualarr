@@ -1,6 +1,7 @@
 // The jobs against a stand-in Sonarr: scanning, paced searching, replacing and setup.
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -29,7 +30,7 @@ function reset(settings = {}) {
   Object.assign(sonarr.state, library(), { writes: [], commands: [], failed: [], deleted: [], failSeries: new Set(), failHistory: false, failCommands: false, failMarkFailed: false });
   sink.received.length = 0;
   sink.fail = false;
-  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings; DELETE FROM checks');
+  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings; DELETE FROM checks; DELETE FROM auto_replaced');
   store.saveSettings({
     sonarrUrl: sonarr.url,
     sonarrApiKey: API_KEY,
@@ -319,6 +320,7 @@ describe('checking files', { skip: !hasFfmpeg() && 'needs ffmpeg' }, () => {
     assert.deepEqual(r.summary.problems, [{ id: 2, title: 'Dandadan', noJapanese: 0, noSubs: 1 }], 'what the check found is news');
     assert.deepEqual(events(), ['problems']);
     assert.ok(r.summary.searched.length, 'and searches as usual');
+    assert.deepEqual([sonarr.state.deleted, r.summary.autoReplaced], [[], undefined], 'nothing is replaced unless asked');
 
     // Next time only the files it couldn't see are due.
     const again = await jobs.scanJob('schedule', { autoSearch: true });
@@ -405,6 +407,109 @@ describe('checking files', { skip: !hasFfmpeg() && 'needs ffmpeg' }, () => {
     assert.match((await jobs.verifyTestJob()).summary.error, /^None of the library's files are visible in this container \(looked for \/anime\/Dandadan\/.*\) — mount the media folder/);
   });
 
+  describe('replacing automatically', () => {
+    const auto = { ...on, autoReplace: true, profileIds: [1] };
+    const E02 = 'Dandadan/Season 1/Dandadan - S01E02.mkv';
+
+    test('a checked file without Japanese audio is deleted, blocklisted and searched for again', async () => {
+      reset(auto);
+      sizes();
+      await jobs.scanJob('scan');
+      await jobs.setupJob(); // Dandadan's profile gets the formats: Sonarr won't grab another dub
+      const r = await jobs.scanJob('schedule', { autoSearch: true });
+      assert.deepEqual(r.summary.autoReplaced, { files: [{ title: 'Dandadan', file: E02, release: null, blocklisted: false }], skipped: [], later: 0 });
+      assert.deepEqual(sonarr.state.deleted, [202]);
+      assert.deepEqual(sonarr.state.commands[0], { name: 'EpisodeSearch', episodeIds: [1006] });
+      assert.deepEqual(store.getSeries(2).counts, { dual: 0, subbed: 1, noSubs: 1, noJapanese: 0, unknown: 0 }, 'the file is gone');
+      assert.deepEqual(r.summary.problems, [{ id: 2, title: 'Dandadan', noJapanese: 0, noSubs: 1 }], 'the replaced file isn’t also a new problem');
+      assert.deepEqual(events(), ['problems', 'replaced']);
+      assert.match(sink.received[1].body.title, /^Dualarr: replaced 1 file without Japanese audio$/);
+      assert.deepEqual([...store.autoReplaceCounts([1006, 1007])], [[1006, 1]]);
+      // E03 is tagged English but sounds Japanese: it stays.
+      assert.equal(store.getSeries(2).files.find((f) => f.id === 203).status, 'subbed');
+    });
+
+    test('the release that made it is blocklisted when Sonarr remembers it', async () => {
+      reset(auto);
+      sizes();
+      await jobs.setupJob();
+      const grab = { id: 950, eventType: 'grabbed', date: '2026-09-02T10:00:00Z', downloadId: 'DL2', sourceTitle: 'Dandadan.S01E02.1080p.WEB.JPN' };
+      const imported = { id: 951, eventType: 'downloadFolderImported', date: '2026-09-02T10:05:00Z', downloadId: 'DL2', data: { importedPath: `/anime/${E02}` } };
+      sonarr.state.history[2].push(grab, imported);
+      const r = await jobs.verifyJob({ seriesIds: [2] });
+      assert.deepEqual(r.summary.autoReplaced.files, [{ title: 'Dandadan', file: E02, release: 'Dandadan.S01E02.1080p.WEB.JPN', blocklisted: true }]);
+      assert.deepEqual(sonarr.state.failed, [950]);
+    });
+
+    test('only where Japanese is expected and a Japanese replacement is likely', async () => {
+      // No Sonarr setup on the profile: Sonarr could grab another dub.
+      reset(auto);
+      sizes();
+      let r = await jobs.verifyJob({ seriesIds: [2] });
+      assert.deepEqual(r.summary.autoReplaced.skipped, [{ title: 'Dandadan', file: E02, why: 'apply the Sonarr setup to its quality profile first, or Sonarr could grab another dub' }]);
+      assert.deepEqual(sonarr.state.deleted, []);
+
+      // A series that isn't Japanese to begin with (a western cartoon typed as anime), or isn't monitored.
+      for (const change of [{ originalLanguage: { name: 'English' } }, { monitored: false }]) {
+        reset(auto);
+        sizes();
+        await jobs.setupJob();
+        Object.assign(sonarr.state.series.find((s) => s.id === 2), change);
+        r = await jobs.verifyJob({ seriesIds: [2] });
+        assert.equal(r.summary.autoReplaced, undefined, JSON.stringify(change));
+        assert.deepEqual(sonarr.state.deleted, []);
+      }
+
+      // An episode that isn't monitored, or was replaced twice already.
+      reset(auto);
+      sizes();
+      await jobs.setupJob();
+      sonarr.state.episodes.find((e) => e.id === 1006).monitored = false;
+      r = await jobs.verifyJob({ seriesIds: [2] });
+      assert.equal(r.summary.autoReplaced.skipped[0].why, 'its episode isn’t monitored');
+      sonarr.state.episodes.find((e) => e.id === 1006).monitored = true;
+      store.noteAutoReplaced(2, [1006]);
+      store.noteAutoReplaced(2, [1006]);
+      r = await jobs.verifyJob({ seriesIds: [2], force: true });
+      assert.match(r.summary.autoReplaced.skipped[0].why, /^replaced 2 times already and still no Japanese audio/);
+      assert.deepEqual(sonarr.state.deleted, []);
+    });
+
+    test('at most autoReplacePerRun files a run; the rest wait', async () => {
+      reset({ ...auto, autoReplacePerRun: 1 });
+      sizes();
+      await jobs.setupJob();
+      const extra = ep('Frieren/Season 2/Frieren - S02E01.mkv', { audio: [{ sound: 'en', tag: 'jpn' }], subs: [{ lang: 'en', tag: 'eng' }] });
+      try {
+        const r = await jobs.verifyJob({ seriesIds: [1, 2] });
+        assert.deepEqual([r.summary.autoReplaced.files.length, r.summary.autoReplaced.later], [1, 1]);
+        assert.match(r.summary.warnings.at(-1), /^1 more file\(s\) without Japanese audio will be replaced in the next runs \(at most 1 a run\)$/);
+        assert.equal(sonarr.state.deleted.length, 1);
+      } finally {
+        fs.rmSync(extra);
+      }
+    });
+
+    test('a failure is a warning; the Replace button now trusts the check too', async () => {
+      reset(auto);
+      sizes();
+      await jobs.setupJob();
+      sonarr.state.failCommands = true;
+      const r = await jobs.verifyJob({ seriesIds: [2] });
+      assert.match(r.summary.warnings.find((w) => w.startsWith('Replacing')), /^Replacing files of Dandadan: Sonarr \/command: HTTP 500/);
+      sonarr.state.failCommands = false;
+
+      // E03 is tagged English: by its tags alone it has no Japanese audio, but the check heard Japanese.
+      reset(on);
+      sizes();
+      await jobs.verifyJob({ seriesIds: [2] });
+      const refused = await jobs.replaceJob(2, [203]);
+      assert.equal(refused.summary.error, 'None of those files break the rules any more — scan again');
+      const ok = await jobs.replaceJob(2, [202]); // tagged Japanese, sounds English
+      assert.equal(ok.summary.replaced.files, 1);
+    });
+  });
+
   test('checks are forgotten with their files and series', async () => {
     reset(on);
     sizes();
@@ -414,8 +519,34 @@ describe('checking files', { skip: !hasFfmpeg() && 'needs ffmpeg' }, () => {
     sonarr.state.files = sonarr.state.files.filter((f) => f.id !== 201);
     await jobs.scanJob('scan');
     assert.deepEqual([...store.getChecks(2).keys()], [202, 203]);
+    store.noteAutoReplaced(2, [1006]);
     sonarr.state.series = sonarr.state.series.filter((s) => s.id !== 2);
     await jobs.scanJob('scan');
     assert.equal(store.getChecks(2).size, 0);
+    assert.equal(store.autoReplaceCounts([1006]).size, 0);
+  });
+});
+
+describe('the Sonarr client', () => {
+  test('sends a read again once after a dropped connection, but never a write', async () => {
+    const { sonarrClient } = await import('../server/sonarr.js');
+    let hits = 0;
+    const flaky = http.createServer((req, res) => {
+      hits++;
+      // Every other request: hang up without answering, like a stale kept-alive connection.
+      if (hits % 2) return req.socket.destroy();
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"appName":"Sonarr"}');
+    });
+    await new Promise((r) => flaky.listen(0, r));
+    try {
+      const client = sonarrClient({ sonarrUrl: `http://127.0.0.1:${flaky.address().port}`, sonarrApiKey: 'k' });
+      assert.deepEqual(await client.status(), { appName: 'Sonarr' });
+      assert.equal(hits, 2);
+      await assert.rejects(client.command({ name: 'EpisodeSearch' }), /fetch failed/);
+      assert.equal(hits, 3, 'a write is not repeated');
+    } finally {
+      flaky.closeAllConnections();
+      flaky.close();
+    }
   });
 });

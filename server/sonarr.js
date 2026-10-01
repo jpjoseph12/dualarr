@@ -6,12 +6,21 @@ export function sonarrClient(settings) {
   const apiKey = (settings.sonarrApiKey || '').trim();
   if (!base || !apiKey) return null;
 
-  async function req(p, init = {}) {
-    const res = await fetch(`${base}/api/v3${p}`, {
-      ...init,
-      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-      signal: AbortSignal.timeout(30_000),
-    });
+  // Network errors where the request may never have reached Sonarr (a kept-alive connection the
+  // other end had already closed): a read is safe to send again.
+  const RETRY = new Set(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']);
+  async function req(p, init = {}, retry = !init.method || init.method === 'GET') {
+    let res;
+    try {
+      res = await fetch(`${base}/api/v3${p}`, {
+        ...init,
+        headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      if (retry && RETRY.has(e.cause?.code)) return req(p, init, false);
+      throw e;
+    }
     const text = await res.text().catch(() => '');
     if (!res.ok) throw new Error(`Sonarr ${p.split('?')[0]}: HTTP ${res.status} ${text.slice(0, 200)}`);
     return text ? JSON.parse(text) : null;
