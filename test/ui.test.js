@@ -331,6 +331,26 @@ describe('the web UI', { skip }, () => {
     await toast('Checking files finished');
   });
 
+  test('Replace automatically: on in Settings, the next check replaces the English-only file', { skip: !hasFfmpeg() && 'needs ffmpeg' }, async () => {
+    await go('#/settings', '#verify-status .checklist');
+    await page.check('input[name=autoReplace]');
+    await page.fill('input[name=autoReplacePerRun]', '5');
+    await clearToasts();
+    await saveSettings();
+    await toast('Settings saved');
+    assert.equal(await page.isChecked('input[name=autoReplace]'), true, 'kept after the page reloads');
+    assert.equal(await page.inputValue('input[name=autoReplacePerRun]'), '5');
+
+    await go('#/', '#verify-now');
+    await openRow(2);
+    await clearToasts();
+    await page.click('[data-verify="2"]');
+    await toast('Checking files finished');
+    assert.ok(sonarr.state.deleted.includes(202), 'S01E02 (tagged Japanese, sounds English) was deleted');
+    await go('#/activity', '.table');
+    await see('.run-lines', 'Replaced Dandadan — Dandadan - S01E02.mkv: no Japanese audio. Sonarr is searching again.');
+  });
+
   test('Activity lists every job and what it did', async () => {
     await go('#/activity', '.table');
     const what = await texts('.table tbody tr td:nth-child(2)');
