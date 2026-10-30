@@ -38,6 +38,14 @@ db.exec(`
     checked_at TEXT NOT NULL
   );
 
+  -- When each episode's file was last replaced, so a replacement that turns out wrong as well
+  -- isn't deleted and grabbed again every night.
+  CREATE TABLE IF NOT EXISTS replaced (
+    episode_id  INTEGER PRIMARY KEY,
+    series_id   INTEGER NOT NULL,
+    replaced_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     trigger     TEXT NOT NULL,
@@ -131,6 +139,24 @@ export function pruneSeries(keepIds) {
   for (const { id } of db.prepare('SELECT id FROM series').all()) if (!keep.has(id)) del.run(id);
   const delChecks = db.prepare('DELETE FROM checks WHERE series_id = ?');
   for (const { series_id: id } of db.prepare('SELECT DISTINCT series_id FROM checks').all()) if (!keep.has(id)) delChecks.run(id);
+  const delReplaced = db.prepare('DELETE FROM replaced WHERE series_id = ?');
+  for (const { series_id: id } of db.prepare('SELECT DISTINCT series_id FROM replaced').all()) if (!keep.has(id)) delReplaced.run(id);
+}
+
+// ---------- replaced episodes ----------
+
+/** The episodes among `episodeIds` whose file was replaced after `since` (an ISO time). */
+export function replacedSince(episodeIds, since) {
+  const stmt = db.prepare('SELECT 1 FROM replaced WHERE episode_id = ? AND replaced_at > ?');
+  return new Set(episodeIds.filter((id) => stmt.get(id, since)));
+}
+
+export function markReplaced(seriesId, episodeIds) {
+  const stmt = db.prepare(
+    `INSERT INTO replaced (episode_id, series_id, replaced_at) VALUES (?, ?, ?)
+     ON CONFLICT(episode_id) DO UPDATE SET series_id = excluded.series_id, replaced_at = excluded.replaced_at`,
+  );
+  for (const id of episodeIds) stmt.run(id, seriesId, now());
 }
 
 // ---------- file checks ----------

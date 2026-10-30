@@ -58,7 +58,11 @@ export function library() {
     { id: 4, name: 'HD-1080p', upgradeAllowed: true, cutoff: 3, minFormatScore: 0, cutoffFormatScore: 0, minUpgradeFormatScore: 1, formatItems: [{ format: 10, name: 'Tier 1 Group', score: 0 }], items: [] },
     { id: 7, name: 'Ultra-HD', upgradeAllowed: true, cutoff: 3, minFormatScore: 0, cutoffFormatScore: 0, minUpgradeFormatScore: 1, formatItems: [], items: [] },
   ];
-  return { series, files, episodes, history, customFormats, qualityProfiles };
+  // Sonarr's command list (GET /command), and failed download handling. Real Sonarr redownloads by
+  // default; off here, so a replace's own search shows in `commands`.
+  const queue = [];
+  const downloadClientConfig = { id: 1, enableCompletedDownloadHandling: true, autoRedownloadFailed: false, autoRedownloadFailedFromInteractiveSearch: false };
+  return { series, files, episodes, history, customFormats, qualityProfiles, queue, downloadClientConfig };
 }
 
 export function startSonarr(port = 0) {
@@ -116,6 +120,8 @@ export function startSonarr(port = 0) {
         state.failed.push(Number(m[1]));
         return send(200);
       }
+      if (p === '/command' && req.method === 'GET') return send(200, state.queue);
+      if (p === '/config/downloadclient') return send(200, state.downloadClientConfig);
       if (p === '/command' && req.method === 'POST') {
         if (state.failCommands) return send(500, { message: 'indexers down' });
         state.commands.push(body);

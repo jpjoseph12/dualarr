@@ -150,9 +150,11 @@ export function scanJob(trigger, { autoSearch = false, notify = true } = {}) {
       throw e;
     }
     if (notify) await notifyChanges(settings, changes, summary);
+    // Searches queued before this point are left over from earlier runs, not from replacing below.
+    const before = new Date().toISOString();
     // Wrong files go first, so the search after it doesn't look for what is being replaced anyway.
     if (autoSearch && settings.autoReplace !== 'off') await replaceDue(client, settings, summary, { notify });
-    if (autoSearch && settings.autoSearch) summary.searched = await searchDue(client, settings, summary);
+    if (autoSearch && settings.autoSearch) summary.searched = await searchDue(client, settings, summary, before);
   });
 }
 
@@ -293,7 +295,22 @@ export function dueForSearch(rows, settings, now = Date.now()) {
     .slice(0, settings.searchPerRun);
 }
 
-async function searchDue(client, settings, summary) {
+const SEARCH_COMMANDS = ['EpisodeSearch', 'SeasonSearch', 'SeriesSearch', 'MissingEpisodeSearch', 'CutoffUnmetEpisodeSearch'];
+
+/** Searches Sonarr still has waiting or running that were queued before `before` (an ISO time). */
+export async function pendingSearches(client, before) {
+  const cmds = await client.commands();
+  return (cmds || []).filter((c) => SEARCH_COMMANDS.includes(c.name) && ['queued', 'started'].includes(c.status) && String(c.queued || '') < before).length;
+}
+
+async function searchDue(client, settings, summary, before = new Date().toISOString()) {
+  // Sonarr works through searches one at a time. If last night's haven't finished, adding more
+  // only piles them up and keeps the indexers busy all day.
+  const pending = await pendingSearches(client, before).catch(() => 0);
+  if (pending) {
+    summary.warnings.push(`Search skipped: Sonarr still has ${pending} search(es) queued from before`);
+    return [];
+  }
   const out = [];
   for (const row of dueForSearch(store.listSeries(), settings)) {
     try {
@@ -354,17 +371,38 @@ async function filesToReplace(client, settings, seriesId, fileIds, statuses = nu
   return { series, targets };
 }
 
+/** An episode replaced automatically isn't replaced automatically again for this long. */
+export const REPLACE_AGAIN_DAYS = 30;
+
 /**
  * Blocklists the grab behind each file (so Sonarr won't download that release again), deletes the
  * file and searches its episodes again, then rescans the series. With `requireGrab`, a file whose
  * grab can't be found or blocklisted is left alone: deleting it could bring the same release back.
+ * With `skipRecent`, a file of an episode replaced in the last REPLACE_AGAIN_DAYS is left alone:
+ * the replacement was wrong too, and doing it again every night only downloads the same thing.
  */
-async function replaceFiles(client, settings, series, targets, summary, { requireGrab = false } = {}) {
-  const [episodes, history] = await Promise.all([client.episodes(series.id), client.seriesHistory(series.id).catch(() => [])]);
+async function replaceFiles(client, settings, series, targets, summary, { requireGrab = false, skipRecent = false, limit = Infinity } = {}) {
+  const [episodes, history, redownload] = await Promise.all([
+    client.episodes(series.id),
+    client.seriesHistory(series.id).catch(() => []),
+    // Marking a grab failed makes Sonarr search again by itself when this is on.
+    client.downloadClientConfig().then((c) => !!c?.autoRedownloadFailed).catch(() => false),
+  ]);
+  const episodesOf = (f) => episodes.filter((e) => e.episodeFileId === f.id).map((e) => e.id);
+  const recent = skipRecent
+    ? store.replacedSince(targets.flatMap(episodesOf), new Date(Date.now() - REPLACE_AGAIN_DAYS * 86_400_000).toISOString())
+    : new Set();
   let blocklisted = 0;
+  let again = 0;
   const done = [];
+  const listedIds = new Set();
   const skipped = [];
   for (const f of targets) {
+    if (done.length >= limit) break;
+    if (episodesOf(f).some((id) => recent.has(id))) {
+      again++;
+      continue;
+    }
     const grab = rules.grabFor(history, f);
     let listed = false;
     if (grab) {
@@ -382,24 +420,29 @@ async function replaceFiles(client, settings, series, targets, summary, { requir
     }
     await client.deleteEpisodeFile(f.id);
     done.push(f);
+    if (listed) listedIds.add(f.id);
   }
-  const replacedIds = new Set(done.map((f) => f.id));
-  const episodeIds = episodes.filter((e) => replacedIds.has(e.episodeFileId)).map((e) => e.id);
-  if (episodeIds.length) await client.command({ name: 'EpisodeSearch', episodeIds });
+  const episodeIds = done.flatMap(episodesOf);
+  // Sonarr already searches for the blocklisted ones; a second search grabs everything twice.
+  const toSearch = done.filter((f) => !(redownload && listedIds.has(f.id))).flatMap(episodesOf);
+  if (toSearch.length) await client.command({ name: 'EpisodeSearch', episodeIds: toSearch });
+  store.markReplaced(series.id, episodeIds);
   const row = done.length ? saveVerdicts(series, await client.episodeFiles(series.id), settings) : null;
-  return { row, files: done.length, blocklisted, episodes: episodeIds.length, skipped: skipped.length };
+  return { row, files: done.length, blocklisted, episodes: episodeIds.length, skipped: skipped.length, again };
 }
 
 /**
  * The scheduled replacement (settings.autoReplace): files in monitored series that break the
  * chosen rules are replaced, at most `replacePerRun` a scan. The new downloads are checked at the
- * next scan, and replaced again if they are wrong too — each wrong release is blocklisted, so it
- * never comes back. Files Sonarr's history can't tie to a release are left for a manual Replace.
+ * next scan; one that is wrong too is replaced again after REPLACE_AGAIN_DAYS, not the next
+ * night, because the same kind of release usually comes back. Files Sonarr's history can't tie
+ * to a release are left for a manual Replace.
  */
 async function replaceDue(client, settings, summary, { notify = true } = {}) {
   const out = [];
   let budget = settings.replacePerRun;
   let skipped = 0;
+  let again = 0;
   for (const row of store.listSeries()) {
     if (budget <= 0) break;
     const statuses = rules.autoReplaceable(row.mode, settings.autoReplace);
@@ -408,9 +451,10 @@ async function replaceDue(client, settings, summary, { notify = true } = {}) {
     try {
       const { series, targets } = await filesToReplace(client, settings, row.id, ids, statuses);
       if (!targets.length) continue;
-      const r = await replaceFiles(client, settings, series, targets.slice(0, budget), summary, { requireGrab: true });
+      const r = await replaceFiles(client, settings, series, targets, summary, { requireGrab: true, skipRecent: true, limit: budget });
       budget -= r.files;
       skipped += r.skipped;
+      again += r.again;
       if (r.files) out.push({ id: row.id, title: row.title, files: r.files, episodes: r.episodes });
     } catch (e) {
       summary.warnings.push(`Replacing files of ${row.title}: ${e.message}`);
@@ -418,6 +462,7 @@ async function replaceDue(client, settings, summary, { notify = true } = {}) {
   }
   summary.autoReplaced = out;
   if (skipped) summary.autoReplaceSkipped = skipped;
+  if (again) summary.autoReplaceRecent = again;
   if (out.length) log(`Replaced ${out.reduce((n, r) => n + r.files, 0)} wrong file(s) automatically`);
   if (out.length && notify && settings.notifyProblems) {
     const failures = await notifyAll(settings.notifiers || [], { kind: 'replaced', series: out });
@@ -458,7 +503,7 @@ export function setupJob() {
 export async function formatIds(client) {
   const all = await client.customFormats();
   const find = (name) => all.find((c) => c.name === name)?.id ?? null;
-  return { dual: find(rules.CF_NAMES.dual), dub: find(rules.CF_NAMES.dub) };
+  return { dual: find(rules.CF_NAMES.dual), dub: find(rules.CF_NAMES.dub), multi: find(rules.CF_NAMES.multi) };
 }
 
 /** What the setup page shows: the formats, and every profile with how many checked series use it. */

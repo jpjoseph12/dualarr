@@ -31,6 +31,10 @@ export function sonarrClient(settings) {
     markFailed: (historyId) => send('POST', `/history/failed/${historyId}`),
     deleteEpisodeFile: (id) => send('DELETE', `/episodefile/${id}`),
     command: (body) => send('POST', '/command', body),
+    /** Recent commands: queued, started and finished. */
+    commands: () => req('/command'),
+    /** Failed download handling, including whether Sonarr searches again by itself. */
+    downloadClientConfig: () => req('/config/downloadclient'),
 
     customFormats: () => req('/customformat'),
     saveCustomFormat: (cf) => (cf.id ? send('PUT', `/customformat/${cf.id}`, cf) : send('POST', '/customformat', cf)),

@@ -634,7 +634,7 @@ async function viewSettings() {
         </div>
 
         <div class="panel wide" id="setup-panel">
-          <div class="panel-head"><div><h2>Sonarr setup</h2><p>Two custom formats that make Sonarr prefer dual audio and never grab an English-only dub, scored in the quality profiles you pick.</p></div></div>
+          <div class="panel-head"><div><h2>Sonarr setup</h2><p>Custom formats that make Sonarr prefer dual audio and never grab an English-only dub (or, for original-only profiles, any second audio track), scored in the quality profiles you pick.</p></div></div>
           <div class="panel-body" id="setup-body">${sonarrConnected() ? loadingBlock('Reading Sonarr’s quality profiles…') : '<span class="hint">Connect Sonarr above and save first.</span>'}</div>
         </div>
 
@@ -758,12 +758,12 @@ async function viewSettings() {
   const renderSetup = (setup) => {
     // Until profiles are chosen, suggest the ones the checked series already use.
     const chosen = new Set(s.profileIds.length ? s.profileIds : setup.profiles.filter((p) => p.series).map((p) => p.id));
-    const formatsOk = setup.formats.dual && setup.formats.dub;
+    const formatsOk = setup.formats.dual && setup.formats.dub && setup.formats.multi;
     setupBody.innerHTML = `
       <div class="notice${formatsOk ? ' info' : ''}" style="margin:0">${
         formatsOk
-          ? `Custom formats <b>Dual Audio (Dualarr)</b> and <b>Dub Only (Dualarr)</b> are in Sonarr.`
-          : 'The custom formats aren’t in Sonarr yet — pick profiles and apply.'
+          ? `Custom formats <b>Dual Audio (Dualarr)</b>, <b>Dub Only (Dualarr)</b> and <b>Multi Audio (Dualarr)</b> are in Sonarr.`
+          : setup.formats.dual ? 'A new custom format isn’t in Sonarr yet — apply again.' : 'The custom formats aren’t in Sonarr yet — pick profiles and apply.'
       }</div>
       <div class="field">
         <span class="label">Quality profiles <span class="label-note">— the ones your anime uses</span></span>
@@ -798,7 +798,7 @@ async function viewSettings() {
       </div>
       <div class="row" style="flex:none">
         <button type="button" class="btn btn-primary btn-sm" id="setup-apply" style="flex:none">Apply to Sonarr</button>
-        <span class="hint">Creates or updates both formats and sets their scores. Dual audio profiles also get upgrades on and “upgrade until” raised, so subbed files keep upgrading until dual audio arrives. Other settings in the profile are left alone. Changing a profile’s mode or language rescans the library.</span>
+        <span class="hint">Creates or updates the formats and sets their scores. Dual audio profiles also get upgrades on and “upgrade until” raised, so subbed files keep upgrading until dual audio arrives. Other settings in the profile are left alone. Changing a profile’s mode or language rescans the library.</span>
       </div>`;
   };
   if (sonarrConnected()) {
@@ -1136,6 +1136,7 @@ function runRow(r) {
   if (s.searched?.length) lines.push(`<span>Searched: ${esc(titles(s.searched, (x) => x.title))}</span>`);
   else if (s.searched && r.trigger === 'schedule') lines.push('<span class="faint">Nothing due for a search</span>');
   if (s.autoReplaced?.length) lines.push(`<span>Replaced automatically: ${esc(titles(s.autoReplaced, (x) => `${x.title} (${x.files})`))}</span>`);
+  if (s.autoReplaceRecent) lines.push(`<span class="faint">${plural(s.autoReplaceRecent, 'file')} left alone: replaced in the last 30 days already, and the new download is wrong too</span>`);
   if (s.autoReplaceSkipped) lines.push(`<span class="faint">${plural(s.autoReplaceSkipped, 'file')} left for a manual Replace: Sonarr’s history doesn’t say which release ${s.autoReplaceSkipped === 1 ? 'it' : 'they'} came from</span>`);
   if (s.replaced) lines.push(`<span>${esc(s.replaced.title)}: deleted ${plural(s.replaced.files, 'file')}, blocklisted ${s.replaced.blocklisted}, searching ${plural(s.replaced.episodes, 'episode')}</span>`);
   if (s.profiles?.length) lines.push(`<span>Scores applied to ${esc(s.profiles.join(', '))}</span>`);

@@ -29,7 +29,7 @@ function reset(settings = {}) {
   Object.assign(sonarr.state, library(), { writes: [], commands: [], failed: [], deleted: [], failSeries: new Set(), failHistory: false, failCommands: false, failMarkFailed: false });
   sink.received.length = 0;
   sink.fail = false;
-  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings; DELETE FROM checks');
+  store.db.exec('DELETE FROM series; DELETE FROM runs; DELETE FROM settings; DELETE FROM checks; DELETE FROM replaced');
   store.saveSettings({
     sonarrUrl: sonarr.url,
     sonarrApiKey: API_KEY,
@@ -278,6 +278,69 @@ describe('automatic replacement', () => {
   });
 });
 
+describe('not making Sonarr download the same thing over and over', () => {
+  /** Dandadan S01E03 (episode 1007) downloads again, and it's an English dub again. */
+  function wrongAgain() {
+    sonarr.state.files.push({ id: 204, seriesId: 2, seasonNumber: 1, relativePath: 'Dandadan/Season 1/Dandadan - S01E03.mkv', path: '/anime/Dandadan/Season 1/Dandadan - S01E03.mkv', size: 1e9, sceneName: 'Dandadan.S01E03.1080p.WEB.DUBBED', mediaInfo: { audioLanguages: 'eng', subtitles: 'eng' } });
+    Object.assign(sonarr.state.episodes.find((e) => e.id === 1007), { episodeFileId: 204, hasFile: true });
+    sonarr.state.history[2].push({ id: 950, eventType: 'grabbed', date: '2026-10-01T10:00:00Z', downloadId: 'DL9', sourceTitle: 'Dandadan.S01E03.1080p.WEB.DUBBED', episodeId: 1007 });
+  }
+
+  test('an episode replaced automatically is left alone for REPLACE_AGAIN_DAYS', async () => {
+    store.saveSettings({ autoReplace: 'language', autoSearch: false });
+    await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(sonarr.state.deleted, [203]);
+    wrongAgain();
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(sonarr.state.deleted, [203], 'not deleted again the next night');
+    assert.deepEqual([r.summary.autoReplaced, r.summary.autoReplaceRecent], [[], 1]);
+    // A month later it is replaced again.
+    store.db.prepare('UPDATE replaced SET replaced_at = ?').run(new Date(Date.now() - (jobs.REPLACE_AGAIN_DAYS + 1) * 86_400_000).toISOString());
+    await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual(sonarr.state.deleted, [203, 204]);
+  });
+
+  test('a manual Replace is always done', async () => {
+    store.saveSettings({ autoReplace: 'language', autoSearch: false });
+    await jobs.scanJob('schedule', { autoSearch: true });
+    wrongAgain();
+    await jobs.scanJob('scan');
+    const r = await jobs.replaceJob(2, [204]);
+    assert.equal(r.summary.replaced.files, 1);
+    assert.deepEqual(sonarr.state.deleted, [203, 204]);
+  });
+
+  test('when Sonarr redownloads failed grabs itself, a blocklisted file gets no second search', async () => {
+    sonarr.state.downloadClientConfig.autoRedownloadFailed = true;
+    await jobs.scanJob('scan');
+    const r = await jobs.replaceJob(2, [203]);
+    assert.deepEqual([r.summary.replaced.blocklisted, sonarr.state.failed, sonarr.state.deleted], [1, [900], [203]]);
+    assert.deepEqual(sonarr.state.commands, [], 'Sonarr searches after the blocklist by itself');
+    // Without a grab to blocklist, Sonarr has nothing to redownload: Dualarr searches.
+    sonarr.state.failHistory = true;
+    await jobs.replaceJob(3, [301]);
+    assert.deepEqual(sonarr.state.commands, [{ name: 'EpisodeSearch', episodeIds: [1008] }]);
+  });
+
+  test("the scheduled search waits while Sonarr still has earlier searches queued", async () => {
+    store.saveSettings({ searchPerRun: 10 });
+    sonarr.state.queue.push(
+      { id: 1, name: 'SeasonSearch', status: 'started', queued: '2026-10-30T04:24:33Z' },
+      { id: 2, name: 'EpisodeSearch', status: 'queued', queued: '2026-10-30T04:24:34Z' },
+      { id: 3, name: 'RssSync', status: 'queued', queued: '2026-10-30T04:24:34Z' },
+      { id: 4, name: 'EpisodeSearch', status: 'completed', queued: '2026-10-30T04:24:34Z' },
+    );
+    const r = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.deepEqual([r.status, r.summary.searched, sonarr.state.commands], ['partial', [], []]);
+    assert.equal(r.summary.warnings[0], 'Search skipped: Sonarr still has 2 search(es) queued from before');
+    // Searches queued during this run (by replacing files) don't count; finished ones never do.
+    sonarr.state.queue.splice(0, 2);
+    sonarr.state.queue.push({ id: 5, name: 'EpisodeSearch', status: 'queued', queued: '2999-01-01T00:00:00Z' });
+    const next = await jobs.scanJob('schedule', { autoSearch: true });
+    assert.equal(next.summary.searched.length, 3);
+  });
+});
+
 describe('per-profile rules', () => {
   test('an original-only profile: subbed is done, dual audio is replaced like a dub', async () => {
     store.saveSettings({ profileRules: { 1: { mode: 'original', lang: 'ja' } } });
@@ -326,18 +389,18 @@ describe('setup', () => {
     assert.equal(r.status, 'ok');
     assert.deepEqual(r.summary.profiles, ['Anime', 'HD-1080p']);
     const ids = r.result;
-    assert.deepEqual(sonarr.state.customFormats.map((c) => c.name), ['Tier 1 Group', rules.CF_NAMES.dual, rules.CF_NAMES.dub]);
+    assert.deepEqual(sonarr.state.customFormats.map((c) => c.name), ['Tier 1 Group', rules.CF_NAMES.dual, rules.CF_NAMES.dub, rules.CF_NAMES.multi]);
     const anime = sonarr.state.qualityProfiles[0];
     assert.equal(rules.profileState(anime, ids).ready, true);
-    assert.equal(anime.formatItems.length, 3, 'the items Sonarr added are updated, not duplicated');
+    assert.equal(anime.formatItems.length, 4, 'the items Sonarr added are updated, not duplicated');
     assert.equal(sonarr.state.qualityProfiles[2].formatItems.find((f) => f.format === ids.dual).score, 0, 'unchosen profiles untouched');
 
     sonarr.state.writes.length = 0;
     const again = await jobs.setupJob();
     assert.deepEqual(again.result, ids);
-    assert.equal(sonarr.state.customFormats.length, 3);
+    assert.equal(sonarr.state.customFormats.length, 4);
     assert.deepEqual(sonarr.state.writes.map((w) => `${w.method} ${w.path}`), [
-      `PUT /customformat/${ids.dual}`, `PUT /customformat/${ids.dub}`, 'PUT /qualityprofile/1', 'PUT /qualityprofile/4',
+      `PUT /customformat/${ids.dual}`, `PUT /customformat/${ids.dub}`, `PUT /customformat/${ids.multi}`, 'PUT /qualityprofile/1', 'PUT /qualityprofile/4',
     ]);
   });
 
@@ -354,7 +417,7 @@ describe('setup', () => {
   test('setupState: formats, and each profile with the series that use it', async () => {
     const client = (await import('../server/sonarr.js')).sonarrClient(store.getSettings());
     const before = await jobs.setupState(client, store.getSettings());
-    assert.deepEqual(before.formats, { dual: null, dub: null });
+    assert.deepEqual(before.formats, { dual: null, dub: null, multi: null });
     assert.deepEqual(before.profiles.map((p) => [p.name, p.series, p.ready]), [['Anime', 3, false], ['HD-1080p', 1, false], ['Ultra-HD', 0, false]]);
     store.saveSettings({ profileIds: [1], scope: 'japanese' });
     await jobs.setupJob();
