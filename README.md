@@ -133,7 +133,7 @@ Notes:
 
 Sonarr gives every release a custom format score, and within the same quality it prefers the release with the higher score. Dualarr's three formats look at the release name:
 
-- **Dual Audio (Dualarr)** matches names like `Dual Audio`, `Dual-Audio`, `Multi-Audio`, `Dual-Lang`, `JPN+ENG` or `JA-EN`.
+- **Dual Audio (Dualarr)** matches names like `Dual Audio`, `Dual-Audio`, `Multi-Audio`, `Tri Audio`, `Dual-Lang`, `JPN+ENG` or `JA-EN`.
 - **Dub Only (Dualarr)** matches `Dub`, `Dubbed` or `English Dub`, unless the name also says dual audio.
 - **Multi Audio (Dualarr)** matches a bare `DUAL` or `MULTi` (as in `…CR.WEB-DL.MULTi.AAC2.0…-VARYG`), unless the name already says dual audio. `MultiSub` and `Multi-Subs` are only subtitles and don't count. These releases usually do carry the dub but not reliably, so a dual audio profile scores them 0; an original-only profile scores them −10000 like Dual Audio, because otherwise Sonarr keeps grabbing them and Dualarr keeps replacing them.
 
@@ -168,7 +168,7 @@ Changing a rule rescans the library, without sending notifications.
 ## Caveats
 
 - **Quality comes first.** Sonarr ranks quality above custom format score. A dual audio release at a lower quality than your current file (a 720p dual audio release against a 1080p subbed file, say) won't replace it. Allow the qualities you would accept for dual audio in the profile.
-- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The language pairs in the pattern are Japanese + English; for other original languages, only the generic "Dual Audio" and "Multi-Audio" names are recognised. The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
+- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The language pairs in the pattern are Japanese + English; for other original languages, only the generic "Dual Audio", "Multi-Audio" and "Tri Audio" names are recognised. The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
 - **Signs & songs tracks count as subtitles** unless [Check files](#check-files) is on. Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
 - **Checks are good, not perfect.** A clip with only music or silence can be misheard. That is why there are three clips and a confidence threshold, and why an unsure result keeps the tag. Text subtitle languages are recognised for English, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Japanese, Chinese and Korean. Reading subtitles means reading the whole file once, which is the slow part on spinning disks.
 - **Very high scores in other formats.** If another custom format in a profile scores more than the dual audio score, a subbed release with it could beat a dual audio one. Raise the dual audio score above it. The setup panel flags this, and also flags a profile where another format scores so high (10000 or more) that a dub-only release could still be grabbed.

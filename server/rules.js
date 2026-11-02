@@ -434,7 +434,7 @@ export const CF_NAMES = { dual: 'Dual Audio (Dualarr)', dub: 'Dub Only (Dualarr)
 export const DUB_SCORE = -10000;
 
 // Release names Sonarr matches these against (case-insensitive .NET regex).
-export const DUAL_RE = String.raw`\b(dual[ ._-]?(audio|lang(uage)?s?)|multi[ ._-]?audio|(jpn?|jap|ja)[ ._+&-]?eng?|eng?[ ._+&-]?(jpn?|jap|ja))\b`;
+export const DUAL_RE = String.raw`\b(dual[ ._-]?(audio|lang(uage)?s?)|(multi|tri)[ ._-]?audio|(jpn?|jap|ja)[ ._+&-]?eng?|eng?[ ._+&-]?(jpn?|jap|ja))\b`;
 export const DUB_RE = String.raw`\b(dub(bed|s)?|eng(lish)?[ ._-]?dub(bed)?)\b`;
 // A bare "DUAL" or "MULTi" (VARYG, AnoZu…): more than one audio track, but not reliably the
 // English dub, so it isn't worth the dual audio score. An original-only profile must still never

@@ -394,6 +394,8 @@ describe('release names', () => {
       'Kaguya-sama.S01.1080p.BluRay.Dual-Lang.x264',
       'Bleach.S01E01.Dubbed.Dual.Audio.1080p',
       'Show.S01.1080p.BluRay.ENG-JPN.x265',
+      '[Trix] Blue Box S02E04 [WEB-DL 1080p AV1 Opus] (Tri Audio, Multi Subs)',
+      'Show.S01E01.1080p.WEB-DL.Tri-Audio.x265',
     ]) assert.equal(match(n), 'dual', n);
   });
 
@@ -441,6 +443,7 @@ describe('release names', () => {
       '[Erai-raws] Dandadan - 03 [1080p][Multiple Subtitle]',
       'Sousou.no.Frieren.S01.1080p.BluRay.Dual-Audio.x265-GROUP', // the dual audio format's
       'Dandadan.S01E01.1080p.CR.WEB-DL.MULTi-AUDIO.AAC2.0.H.264-VARYG',
+      '[Trix] Blue Box S02E04 [WEB-DL 1080p AV1 Opus] (Tri Audio, Multi Subs)', // dual audio; Multi Subs is subtitles
       'Hunter.x.Hunter.2011.S01E01.1080p.BluRay.x264',
     ]) assert.equal(bare(n), false, n);
   });
