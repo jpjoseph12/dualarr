@@ -242,7 +242,7 @@ describe('the web UI', { skip }, () => {
     await toast('Applied to Anime, HD-1080p');
     await see('#setup-body .notice.info', 'are in Sonarr');
     assert.equal(await page.locator('#setup-body .ready').count(), 2);
-    assert.deepEqual(sonarr.state.customFormats.map((f) => f.name).slice(1).sort(), ['Dual Audio (Dualarr)', 'Dub Only (Dualarr)']);
+    assert.deepEqual(sonarr.state.customFormats.map((f) => f.name).slice(1).sort(), ['Dual Audio (Dualarr)', 'Dub Only (Dualarr)', 'Multi Audio (Dualarr)']);
     assert.equal(sonarr.state.qualityProfiles.find((p) => p.id === 1).upgradeAllowed, true);
   });
 

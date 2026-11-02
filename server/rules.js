@@ -430,12 +430,17 @@ export function grabFor(history, file) {
 
 // ---------- Sonarr custom formats & quality profiles ----------
 
-export const CF_NAMES = { dual: 'Dual Audio (Dualarr)', dub: 'Dub Only (Dualarr)' };
+export const CF_NAMES = { dual: 'Dual Audio (Dualarr)', dub: 'Dub Only (Dualarr)', multi: 'Multi Audio (Dualarr)' };
 export const DUB_SCORE = -10000;
 
 // Release names Sonarr matches these against (case-insensitive .NET regex).
-export const DUAL_RE = String.raw`\b(dual[ ._-]?(audio|lang(uage)?s?)|multi[ ._-]?audio|(jpn?|jap|ja)[ ._+&-]?eng?|eng?[ ._+&-]?(jpn?|jap|ja))\b`;
+export const DUAL_RE = String.raw`\b(dual[ ._-]?(audio|lang(uage)?s?)|(multi|tri)[ ._-]?audio|(jpn?|jap|ja)[ ._+&-]?eng?|eng?[ ._+&-]?(jpn?|jap|ja))\b`;
 export const DUB_RE = String.raw`\b(dub(bed|s)?|eng(lish)?[ ._-]?dub(bed)?)\b`;
+// A bare "DUAL" or "MULTi" (VARYG, AnoZu…): more than one audio track, but not reliably the
+// English dub, so it isn't worth the dual audio score. An original-only profile must still never
+// grab it, or every one of them is replaced and grabbed again night after night. "MultiSub(s)"
+// is only subtitles.
+export const MULTI_RE = String.raw`\b(dual|multi)\b(?![ ._-]?subs?\b)`;
 
 const titleSpec = (name, value, { negate = false, required = false } = {}) => ({
   name,
@@ -445,7 +450,7 @@ const titleSpec = (name, value, { negate = false, required = false } = {}) => ({
   fields: [{ name: 'value', value }],
 });
 
-/** The two custom formats Dualarr keeps in Sonarr. */
+/** The custom formats Dualarr keeps in Sonarr. */
 export function customFormats() {
   return {
     dual: {
@@ -461,6 +466,14 @@ export function customFormats() {
         titleSpec('Not dual audio', DUAL_RE, { negate: true, required: true }),
       ],
     },
+    multi: {
+      name: CF_NAMES.multi,
+      includeCustomFormatWhenRenaming: false,
+      specifications: [
+        titleSpec('DUAL or MULTi', MULTI_RE, { required: true }),
+        titleSpec('Not dual audio', DUAL_RE, { negate: true, required: true }),
+      ],
+    },
   };
 }
 
@@ -473,14 +486,17 @@ const topOtherScore = (p, ours) => Math.max(0, ...(p.formatItems || []).filter((
  *  - upgrades are on, and continue until a file scores at least the dual audio score (so a
  *    subbed file keeps being upgraded until dual audio arrives),
  *  - the minimum score is high enough that a dub-only release is never grabbed.
- * For an original-only profile, dual audio scores DUB_SCORE too (never grabbed), and "upgrade
- * until" comes back down to what other formats can reach, so Sonarr doesn't keep searching for a
- * dual audio upgrade it may no longer take. Upgrades are left as they are.
+ * For an original-only profile, dual audio (and a bare DUAL / MULTi) scores DUB_SCORE too (never
+ * grabbed), and "upgrade until" comes back down to what other formats can reach, so Sonarr doesn't
+ * keep searching for a dual audio upgrade it may no longer take. Upgrades are left as they are.
+ * A dual audio profile scores DUAL / MULTi 0: it may well be the dub, but it isn't worth replacing
+ * a file for.
  */
 export function profileWithScores(p, ids, dualScore, mode = 'dual') {
   const original = mode === 'original';
   const ours = new Map([[ids.dual, original ? DUB_SCORE : dualScore], [ids.dub, DUB_SCORE]]);
-  const names = { [ids.dual]: CF_NAMES.dual, [ids.dub]: CF_NAMES.dub };
+  if (ids.multi) ours.set(ids.multi, original ? DUB_SCORE : 0);
+  const names = { [ids.dual]: CF_NAMES.dual, [ids.dub]: CF_NAMES.dub, [ids.multi]: CF_NAMES.multi };
   const items = (p.formatItems || []).map((fi) => (ours.has(fi.format) ? { ...fi, score: ours.get(fi.format) } : fi));
   for (const [format, score] of ours) if (!items.some((fi) => fi.format === format)) items.push({ format, name: names[format], score });
   const top = topOtherScore(p, ours);
@@ -497,16 +513,18 @@ export function profileWithScores(p, ids, dualScore, mode = 'dual') {
 
 /** How a quality profile stands with respect to Dualarr's formats, in the given mode. */
 export function profileState(p, ids, mode = 'dual') {
-  const ours = new Set([ids.dual, ids.dub].filter(Boolean));
+  const ours = new Set([ids.dual, ids.dub, ids.multi].filter(Boolean));
   const score = (id) => (id ? (p.formatItems || []).find((fi) => fi.format === id)?.score ?? null : null);
   const dual = score(ids.dual);
   const dub = score(ids.dub);
+  const multi = score(ids.multi);
   const top = topOtherScore(p, ours);
   const blocked = (s) => s < 0 && s + top < (p.minFormatScore ?? 0);
   const problems = [];
-  if (!ids.dual || !ids.dub) problems.push('custom formats not created yet');
+  if (!ids.dual || !ids.dub || !ids.multi) problems.push('custom formats not created yet');
   else if (mode === 'original') {
     if (!blocked(dual ?? 0)) problems.push('dual audio releases can still be grabbed');
+    if (!blocked(multi ?? 0)) problems.push('DUAL / MULTi releases can still be grabbed');
     if (!blocked(dub ?? 0)) problems.push('dub-only releases can still be grabbed');
     if ((p.cutoffFormatScore ?? 0) > top) problems.push(`“upgrade until” score (${p.cutoffFormatScore}) can only be reached by dual audio`);
   } else {
@@ -521,6 +539,7 @@ export function profileState(p, ids, mode = 'dual') {
     mode,
     dual,
     dub,
+    multi,
     top,
     upgradeAllowed: !!p.upgradeAllowed,
     cutoffFormatScore: p.cutoffFormatScore ?? 0,

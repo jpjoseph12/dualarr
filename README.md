@@ -8,9 +8,10 @@ Dualarr is a companion to Sonarr, and a sibling of [Courarr](https://github.com/
 
 ## What it does
 
-1. **Custom formats in Sonarr, in one click.** Dualarr creates two custom formats and scores them in the quality profiles you pick:
+1. **Custom formats in Sonarr, in one click.** Dualarr creates three custom formats and scores them in the quality profiles you pick:
    - **Dual Audio (Dualarr)** is scored high (+2000 by default), so a dual audio release is always an upgrade over a subbed one.
    - **Dub Only (Dualarr)** is scored −10000, so English-only dubs are never grabbed.
+   - **Multi Audio (Dualarr)** catches a bare `DUAL` or `MULTi` in the name. It scores 0 in dual audio profiles and −10000 in original-only ones.
 
    It also turns upgrades on and sets the profile's "upgrade until" score, so subbed files keep being upgraded until dual audio arrives. From then on, Sonarr's own RSS sync and upgrade logic replaces subbed files by itself.
 2. **A check of every file on disk**, using Sonarr's media info (the languages of the audio and subtitle tracks). Each file gets one verdict:
@@ -25,7 +26,7 @@ Dualarr is a companion to Sonarr, and a sibling of [Courarr](https://github.com/
    - **Search** asks Sonarr to look for better releases. A season where every file needs work gets one season search, which finds batch releases (where dual audio usually turns up); otherwise the monitored episodes are searched one by one.
    - The **nightly scan** also searches a few series (10 by default), least recently searched first, and waits a week before searching the same series again. A big library is worked through over a few nights without hammering your indexers.
    - **Replace** is for files that break the rules (no audio in the original language, no subtitles, or dual audio in an original-only profile). It marks the release that produced the file as failed in Sonarr (so it is blocklisted), deletes the file and searches for the episode again.
-   - **Replace wrong files automatically** (Settings → Schedule & searching, off by default) does the same after every scheduled scan, for files in the wrong audio language (and optionally files without subtitles), up to 10 files a scan. The new download is checked at the next scan and replaced again if it is wrong too, and each wrong release is blocklisted, so it never comes back. Files that Sonarr's history can't tie to a release are left for a manual Replace, because deleting them could just bring the same release back. Unmonitored series are never touched.
+   - **Replace wrong files automatically** (Settings → Schedule & searching, off by default) does the same after every scheduled scan, for files in the wrong audio language (and optionally files without subtitles), up to 10 files a scan. Each wrong release is blocklisted. The new download is checked at the next scan, but an episode is only replaced automatically once every 30 days: when the replacement is wrong too, the same kind of release usually keeps coming back, and replacing it every night would only download it over and over. If Sonarr's *Redownload Failed* is on, Sonarr searches by itself after the blocklist, so Dualarr doesn't search a second time. Files that Sonarr's history can't tie to a release are left for a manual Replace, because deleting them could just bring the same release back. Unmonitored series are never touched.
 4. **Checking the files themselves (optional).** Language tags can be wrong. With [Check files](#check-files) on, Dualarr listens to each audio track with [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads the subtitles, on the CPU or a GPU. That catches mislabelled releases, untagged tracks and signs & songs-only subtitles.
 5. **Notifications** (Discord, Telegram, ntfy, Gotify or a JSON webhook) when files are upgraded to dual audio, when new files break the rules, and when a scheduled scan can't reach Sonarr.
 
@@ -130,10 +131,11 @@ Notes:
 
 ## How the custom formats work
 
-Sonarr gives every release a custom format score, and within the same quality it prefers the release with the higher score. Dualarr's two formats look at the release name:
+Sonarr gives every release a custom format score, and within the same quality it prefers the release with the higher score. Dualarr's three formats look at the release name:
 
-- **Dual Audio (Dualarr)** matches names like `Dual Audio`, `Dual-Audio`, `Multi-Audio`, `Dual-Lang`, `JPN+ENG` or `JA-EN`.
+- **Dual Audio (Dualarr)** matches names like `Dual Audio`, `Dual-Audio`, `Multi-Audio`, `Tri Audio`, `Dual-Lang`, `JPN+ENG` or `JA-EN`.
 - **Dub Only (Dualarr)** matches `Dub`, `Dubbed` or `English Dub`, unless the name also says dual audio.
+- **Multi Audio (Dualarr)** matches a bare `DUAL` or `MULTi` (as in `…CR.WEB-DL.MULTi.AAC2.0…-VARYG`), unless the name already says dual audio. `MultiSub` and `Multi-Subs` are only subtitles and don't count. These releases usually do carry the dub but not reliably, so a dual audio profile scores them 0; an original-only profile scores them −10000 like Dual Audio, because otherwise Sonarr keeps grabbing them and Dualarr keeps replacing them.
 
 In each profile you pick, **Apply to Sonarr**:
 
@@ -150,7 +152,7 @@ Each quality profile in **Settings → Sonarr setup** has two choices, and every
 
 - **Mode**
   - **Dual audio (original + English)**, the default: subbed files wait for the dub and are upgraded when it comes out.
-  - **Original language only**: original audio with subtitles is the goal. In Sonarr, Dual Audio is scored −10000 like Dub Only, so dual audio releases are never grabbed. *Upgrade Until Custom Format Score* comes back down to what your other formats can reach, and *Upgrades Allowed* is left as it is. In Dualarr, a dual audio file is a problem that can be searched for and replaced, and a subbed file is done.
+  - **Original language only**: original audio with subtitles is the goal. In Sonarr, Dual Audio and Multi Audio are scored −10000 like Dub Only, so dual audio releases are never grabbed. *Upgrade Until Custom Format Score* comes back down to what your other formats can reach, and *Upgrades Allowed* is left as it is. In Dualarr, a dual audio file is a problem that can be searched for and replaced, and a subbed file is done.
 - **Original language**: **Japanese** by default. You can pick another (Chinese, Korean and more) or **Each series' own (from Sonarr)**, which uses the original language Sonarr has for the series. That suits a library with Chinese animation (donghua) next to anime: a donghua needs Chinese audio, and its Japanese dub counts as a dub.
 
 To give some series different rules, make a second quality profile in Sonarr (for example *Anime — Japanese only*) and move those series to it. Changing a profile's mode or language rescans the library.
@@ -166,7 +168,7 @@ Changing a rule rescans the library, without sending notifications.
 ## Caveats
 
 - **Quality comes first.** Sonarr ranks quality above custom format score. A dual audio release at a lower quality than your current file (a 720p dual audio release against a 1080p subbed file, say) won't replace it. Allow the qualities you would accept for dual audio in the profile.
-- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The language pairs in the pattern are Japanese + English; for other original languages, only the generic "Dual Audio" and "Multi-Audio" names are recognised. The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
+- **Custom formats only see release names.** Sonarr can only tell a release is dual audio if its name says so ("Dual Audio", "Multi-Audio", "JPN+ENG" and so on). The language pairs in the pattern are Japanese + English; for other original languages, only the generic "Dual Audio", "Multi-Audio" and "Tri Audio" names are recognised. The file scan reads the real audio tracks, so it is the ground truth: a dual audio release with a plain name shows up as dual audio once it is on disk, and a mislabelled one shows up as what it really is. The two parts work together.
 - **Signs & songs tracks count as subtitles** unless [Check files](#check-files) is on. Media info can't tell a signs & songs track apart from full subtitles, so a file with only signs & songs passes the subtitle check.
 - **Checks are good, not perfect.** A clip with only music or silence can be misheard. That is why there are three clips and a confidence threshold, and why an unsure result keeps the tag. Text subtitle languages are recognised for English, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Japanese, Chinese and Korean. Reading subtitles means reading the whole file once, which is the slow part on spinning disks.
 - **Very high scores in other formats.** If another custom format in a profile scores more than the dual audio score, a subbed release with it could beat a dual audio one. Raise the dual audio score above it. The setup panel flags this, and also flags a profile where another format scores so high (10000 or more) that a dub-only release could still be grabbed.

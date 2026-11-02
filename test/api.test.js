@@ -353,20 +353,20 @@ describe('library', () => {
 describe('Sonarr setup', () => {
   test('state before, apply, state after', async () => {
     const before = await ok('GET', '/api/setup');
-    assert.deepEqual(before.formats, { dual: null, dub: null });
+    assert.deepEqual(before.formats, { dual: null, dub: null, multi: null });
     assert.deepEqual(before.profiles.map((p) => [p.name, p.series, p.ready]), [['Anime', 3, false], ['HD-1080p', 1, false], ['Ultra-HD', 0, false]]);
     assert.equal((await me.ui('POST', '/api/setup', { profileIds: [] })).status, 400);
 
     const r = await ok('POST', '/api/setup', { profileIds: [1, 4], dualScore: 2500 });
     assert.deepEqual([r.status, r.summary.profiles], ['ok', ['Anime', 'HD-1080p']]);
-    assert.ok(r.formats.dual && r.formats.dub);
+    assert.ok(r.formats.dual && r.formats.dub && r.formats.multi);
     assert.deepEqual(r.profiles.map((p) => [p.name, p.ready, p.dual]), [['Anime', true, 2500], ['HD-1080p', true, 2500], ['Ultra-HD', false, 0]]);
     assert.deepEqual([store.getSettings().profileIds, store.getSettings().dualScore], [[1, 4], 2500]);
 
     // Again with the saved choices: formats updated in place, nothing duplicated.
     const again = await ok('POST', '/api/setup', {});
     assert.deepEqual(again.summary.profiles, ['Anime', 'HD-1080p']);
-    assert.equal(sonarr.state.customFormats.length, 3);
+    assert.equal(sonarr.state.customFormats.length, 4);
     assert.equal(again.rescanning, false, 'nothing about the verdicts changed');
   });
 

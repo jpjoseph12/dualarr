@@ -307,19 +307,20 @@ describe('per-profile rules: mode and original language', () => {
   });
 
   test('original-only profiles block dual audio in Sonarr, and "upgrade until" comes back down', () => {
-    const ids = { dual: 10, dub: 11 };
+    const ids = { dual: 10, dub: 11, multi: 12 };
     const dualProfile = rules.profileWithScores(
       { id: 1, name: 'Anime', upgradeAllowed: false, cutoffFormatScore: 0, minFormatScore: 0, formatItems: [{ format: 1, score: 500 }] },
       ids,
       2000,
     );
     const p = rules.profileWithScores(dualProfile, ids, 2000, 'original');
-    assert.deepEqual(p.formatItems.map((fi) => fi.score), [500, rules.DUB_SCORE, rules.DUB_SCORE]);
+    assert.deepEqual(p.formatItems.map((fi) => fi.score), [500, rules.DUB_SCORE, rules.DUB_SCORE, rules.DUB_SCORE], 'DUAL / MULTi too');
     assert.deepEqual([p.cutoffFormatScore, p.minFormatScore, p.upgradeAllowed], [500, 0, true], 'upgrades are left as they were');
     assert.deepEqual([rules.profileState(p, ids, 'original').ready, rules.profileState(p, ids, 'original').mode], [true, 'original']);
     assert.equal(rules.profileState(p, ids).ready, false, 'not ready for dual audio any more');
     assert.deepEqual(rules.profileState(dualProfile, ids, 'original').problems, [
       'dual audio releases can still be grabbed',
+      'DUAL / MULTi releases can still be grabbed',
       '“upgrade until” score (2000) can only be reached by dual audio',
     ]);
   });
@@ -393,6 +394,8 @@ describe('release names', () => {
       'Kaguya-sama.S01.1080p.BluRay.Dual-Lang.x264',
       'Bleach.S01E01.Dubbed.Dual.Audio.1080p',
       'Show.S01.1080p.BluRay.ENG-JPN.x265',
+      '[Trix] Blue Box S02E04 [WEB-DL 1080p AV1 Opus] (Tri Audio, Multi Subs)',
+      'Show.S01E01.1080p.WEB-DL.Tri-Audio.x265',
     ]) assert.equal(match(n), 'dual', n);
   });
 
@@ -421,11 +424,33 @@ describe('release names', () => {
     assert.equal(cfs.dual.name, rules.CF_NAMES.dual);
     assert.deepEqual(cfs.dual.specifications.map((s) => [s.implementation, s.fields[0].value]), [['ReleaseTitleSpecification', rules.DUAL_RE]]);
     assert.deepEqual(cfs.dub.specifications.map((s) => [s.negate, s.required]), [[false, true], [true, true]]);
+    assert.deepEqual(cfs.multi.specifications.map((s) => [s.fields[0].value, s.negate, s.required]), [[rules.MULTI_RE, false, true], [rules.DUAL_RE, true, true]]);
+  });
+
+  test('a bare DUAL or MULTi is its own format; MultiSub is only subtitles', () => {
+    const multi = new RegExp(rules.MULTI_RE, 'i');
+    // The format also requires "not dual audio", so these are the names the dual audio one misses.
+    const bare = (name) => multi.test(name) && !dual.test(name);
+    for (const n of [
+      'BLACK.TORCH.S01E07.3.ON.THREE.1080p.CR.WEB-DL.MULTi.AAC2.0.H.264-VARYG',
+      'BLACK.TORCH.S01E07.3.ON.THREE.1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG',
+      'BLACK.TORCH.2026.S01E12.1080p.CR.WEB-DL.DUAL.DDP2.0.H.264-AnoZu',
+      '[Group] Show - 01 [1080p] [Multi]',
+    ]) assert.equal(bare(n), true, n);
+    for (const n of [
+      'Show.S01E01.1080p.CR.WEB-DL.AAC2.0.H.264.MultiSub-VARYG',
+      'Show.S01E01.1080p.WEB-DL.Multi-Subs.x264',
+      '[Erai-raws] Dandadan - 03 [1080p][Multiple Subtitle]',
+      'Sousou.no.Frieren.S01.1080p.BluRay.Dual-Audio.x265-GROUP', // the dual audio format's
+      'Dandadan.S01E01.1080p.CR.WEB-DL.MULTi-AUDIO.AAC2.0.H.264-VARYG',
+      '[Trix] Blue Box S02E04 [WEB-DL 1080p AV1 Opus] (Tri Audio, Multi Subs)', // dual audio; Multi Subs is subtitles
+      'Hunter.x.Hunter.2011.S01E01.1080p.BluRay.x264',
+    ]) assert.equal(bare(n), false, n);
   });
 });
 
 describe('quality profile scores', () => {
-  const ids = { dual: 100, dub: 101 };
+  const ids = { dual: 100, dub: 101, multi: 102 };
   const lib = library();
   const anime = lib.qualityProfiles[0]; // another format scores 1500, upgrades off
 
@@ -443,6 +468,7 @@ describe('quality profile scores', () => {
       { format: 10, name: 'Tier 1 Group', score: 1500 },
       { format: 100, name: rules.CF_NAMES.dual, score: 2000 },
       { format: 101, name: rules.CF_NAMES.dub, score: -10000 },
+      { format: 102, name: rules.CF_NAMES.multi, score: 0 },
     ]);
     assert.deepEqual([p.upgradeAllowed, p.cutoffFormatScore, p.minFormatScore, p.name, p.cutoff], [true, 2000, 0, 'Anime', 3]);
     const after = rules.profileState(p, ids);
@@ -452,9 +478,9 @@ describe('quality profile scores', () => {
   test('existing items are updated, not duplicated, and higher settings are kept', () => {
     const p0 = { ...anime, cutoffFormatScore: 5000, minFormatScore: 10, formatItems: [...anime.formatItems, { format: 100, name: 'x', score: 3 }, { format: 101, name: 'y', score: 0 }] };
     const p = rules.profileWithScores(p0, ids, 2000);
-    assert.equal(p.formatItems.length, 3);
+    assert.equal(p.formatItems.length, 4);
     assert.deepEqual([p.cutoffFormatScore, p.minFormatScore], [5000, 10]);
-    assert.equal(rules.profileWithScores(p, ids, 2000).formatItems.length, 3, 'idempotent');
+    assert.equal(rules.profileWithScores(p, ids, 2000).formatItems.length, 4, 'idempotent');
   });
 
   test('a low dual score is raised above the best other format for the cutoff', () => {
@@ -476,9 +502,11 @@ describe('quality profile scores', () => {
   });
 
   test('before the formats exist', () => {
-    const st = rules.profileState({ id: 7, name: 'Ultra-HD' }, { dual: null, dub: null });
+    const st = rules.profileState({ id: 7, name: 'Ultra-HD' }, { dual: null, dub: null, multi: null });
     assert.deepEqual([st.ready, st.problems, st.dual, st.dub, st.top, st.cutoffFormatScore, st.minFormatScore], [false, ['custom formats not created yet'], null, null, 0, 0, 0]);
     const p = rules.profileWithScores({ id: 7, name: 'Ultra-HD' }, ids, 2000);
-    assert.equal(p.formatItems.length, 2);
+    assert.equal(p.formatItems.length, 3);
+    // Set up before the third format existed: it is missing, so apply again.
+    assert.deepEqual(rules.profileState(p, { dual: 100, dub: 101, multi: null }).problems, ['custom formats not created yet']);
   });
 });
